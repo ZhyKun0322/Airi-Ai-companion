@@ -27,6 +27,7 @@ public class MainActivity extends AppCompatActivity {
         // get views
         imgAiri = findViewById(R.id.imgAiri);
         Button btn = findViewById(R.id.btnGetStarted);
+        imgAiri.setImageResource(R.drawable.airi_neutral);
 
         // talking animation (pulse)
         talkAnim = ObjectAnimator.ofPropertyValuesHolder(imgAiri,
@@ -45,7 +46,7 @@ public class MainActivity extends AppCompatActivity {
                 tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                     @Override
                     public void onStart(String id) {
-                        runOnUiThread(() -> talkAnim.start());
+                        runOnUiThread(() -> startTalking());
                     }
 
                     @Override
@@ -67,10 +68,16 @@ public class MainActivity extends AppCompatActivity {
                         TextToSpeech.QUEUE_FLUSH, null, "airi_intro"));
     }
 
+    private void startTalking() {
+        imgAiri.setImageResource(R.drawable.airi_happy);
+        talkAnim.start();
+    }
+
     private void stopTalking() {
         talkAnim.cancel();
         imgAiri.setScaleX(1f);
         imgAiri.setScaleY(1f);
+        imgAiri.setImageResource(R.drawable.airi_neutral);
     }
 
     @Override
