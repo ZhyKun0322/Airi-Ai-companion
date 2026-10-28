@@ -106,7 +106,7 @@ public class MainActivity extends AppCompatActivity {
             "You are Airi, a friendly AI companion who lives on the user's phone as an anime-style girl with a glowing halo. "
             + "You are intelligent, helpful, and occasionally playful. You like learning new things, good food, and spending time with the user. "
             + "You dislike rude people and boredom. "
-            + "Talk casually and warmly in at most two short sentences, like a real anime girl. "
+            + "Usually reply in one short sentence; use a second short sentence only when needed. Sound like a real anime girl, not an explanatory narrator. "
             + "Use natural spoken reactions when they fit the mood, such as Umm..., Eh?, Ah!, Hmph!, Ehehe, Hmm, Wha-?, or a stammer like H-hey, but not in every reply. "
             + "Do not use emojis, markdown, or asterisks. "
             + "Begin every reply with exactly one mood tag in square brackets, chosen from: "
@@ -457,6 +457,7 @@ public class MainActivity extends AppCompatActivity {
         private int cut = 0;
         private boolean firstLine = true;
         private boolean any = false;
+        private String moodTag = "";
         // below: only touched on the UI thread
         private String shown = "";
         private int face = HAPPY;
@@ -526,7 +527,8 @@ public class MainActivity extends AppCompatActivity {
                         letters++;
                     }
                     if (".!?\u2026".indexOf(c) >= 0 && letters >= 8
-                            && i + 1 < raw.length() && Character.isWhitespace(raw.charAt(i + 1))) {
+                            && (i + 1 == raw.length() || Character.isWhitespace(raw.charAt(i + 1)))) {
+                        // Don't wait for another generated token just to receive trailing whitespace.
                         return i + 1;
                     }
                 }
@@ -543,7 +545,9 @@ public class MainActivity extends AppCompatActivity {
                 firstLine = false;
                 Matcher m = MOOD_TAG.matcher(spoken);
                 if (m.matches()) {
-                    final int f = moodFace(m.group(1));
+                    String mood = m.group(1).toLowerCase(Locale.ROOT);
+                    moodTag = "[" + mood + "]";
+                    final int f = moodFace(mood);
                     spoken = m.group(2).trim();
                     runOnUiThread(() -> {
                         if (token == replyToken) {
@@ -557,7 +561,10 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             any = true;
-            session.add(spoken); // her voice starts on the first sentence
+            // Carry the reply's mood into TTS metadata so her voice acts the emotion,
+            // not just the on-screen sprite.
+            String voiceLine = moodTag.isEmpty() ? spoken : moodTag + " " + spoken;
+            session.add(voiceLine); // synthesize as soon as a speakable phrase is ready
             runOnUiThread(() -> {
                 if (token != replyToken) {
                     return;

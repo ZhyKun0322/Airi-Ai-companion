@@ -1,0 +1,9 @@
+Airi voice tuning changes
+
+- Defaults to Gemini 3.8 Flash-Lite TTS for lower speech startup latency.
+- Uses the Leda youthful voice preset with stronger anime-character acting direction.
+- Carries Airi's reply mood tag into TTS style metadata.
+- Reduces waiting in the speech queue and sends completed sentences as soon as punctuation arrives.
+- Keeps the flagship Gemini 3.8 Flash TTS model as a fallback only if the preferred model is unavailable.
+
+Note: Voice timbre is still determined by Gemini's selected preset and the model; text style guidance improves delivery but cannot guarantee the same timbre as a previous TTS model. Build and test on a device with Android Studio/Gradle available.

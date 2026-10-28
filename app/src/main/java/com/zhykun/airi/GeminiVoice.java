@@ -55,22 +55,25 @@ public class GeminiVoice {
         }
     }
 
-    // Current Gemini TTS model; fall back to the faster/lower-cost model on API failure.
-    public static final String DEFAULT_MODEL = "gemini-3.8-flash-tts";
-    private static final String FALLBACK_MODEL = "gemini-3.8-flash-lite-tts";
+    // Flash-Lite is Google's low-latency TTS model for conversational voice cascades.
+    // Use the flagship expressive model only if the preferred model is not available.
+    public static final String DEFAULT_MODEL = "gemini-3.8-flash-lite-tts";
+    private static final String FALLBACK_MODEL = "gemini-3.8-flash-tts";
     public static final String DEFAULT_VOICE = "Leda"; // Google describes Leda as youthful.
 
     private static final String TAG = "AiriGeminiVoice";
     // Gemini 3.8 TTS uses POST /v1beta/interactions, not models:streamGenerateContent.
     private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
     private static final String STYLE =
-            "Speak as a bright, youthful female anime character voice actress: a light, "
-            + "slightly high-pitched but natural voice, cute and lively intonation, "
-            + "playful emotional changes, warm friendliness, expressive reactions, and "
-            + "clear articulation. Sound like original anime-style character acting, "
-            + "not a flat assistant or narrator. Keep the delivery natural and understandable.";
-    // Keep the startup buffer short to reduce the time before the first audible word.
-    private static final double PREBUFFER_SEC = 0.12;
+            "Perform as an original Japanese-anime-inspired female character speaking naturally in the user's language, "
+            + "not as a generic assistant. Use a youthful, bright mid-to-high pitch, a light "
+            + "slightly airy resonance, bouncy conversational rhythm, melodic pitch movement, "
+            + "cute natural reactions, and expressive emotional turns. Keep it warm, playful, "
+            + "lively, and clear, with quick but understandable phrasing and short natural pauses. "
+            + "Avoid a flat, deep, mature, formal, corporate, or narrator-like delivery. "
+            + "Read only the supplied words; do not add explanations.";
+    // Small startup buffer, balanced against avoiding choppy playback on mobile audio stacks.
+    private static final double PREBUFFER_SEC = 0.08;
 
     private static class Pcm {
         byte[] data;
@@ -166,9 +169,11 @@ public class GeminiVoice {
             return DEFAULT_MODEL;
         }
         String candidate = model.trim();
+        // Migrate previous preview and flagship defaults to the lower-latency stable model.
         if (candidate.equals("gemini-3.1-flash-tts-preview")
                 || candidate.equals("gemini-2.5-flash-preview-tts")
-                || candidate.equals("gemini-2.5-pro-preview-tts")) {
+                || candidate.equals("gemini-2.5-pro-preview-tts")
+                || candidate.equals("gemini-3.8-flash-tts")) {
             return DEFAULT_MODEL;
         }
         return candidate.matches("[A-Za-z0-9._-]+") ? candidate : DEFAULT_MODEL;
@@ -179,7 +184,8 @@ public class GeminiVoice {
         boolean[] started = {false};
         try {
             while (isCurrent(id)) {
-                String line = session.queue.poll(200, TimeUnit.MILLISECONDS);
+                // Don't leave the first phrase waiting behind a long queue-poll timeout.
+                String line = session.queue.poll(20, TimeUnit.MILLISECONDS);
                 if (line == null) {
                     continue;
                 }
@@ -274,12 +280,13 @@ public class GeminiVoice {
         }
 
         String transcript = prepareTranscript(text);
+        String deliveryStyle = styleForText(text);
         JSONObject textPart = new JSONObject()
                 .put("type", "text")
                 .put("text", transcript)
                 .put("annotations", new JSONArray().put(new JSONObject()
                         .put("type", "speech_metadata")
-                        .put("style", STYLE)));
+                        .put("style", deliveryStyle)));
         JSONObject body = new JSONObject()
                 .put("model", model)
                 .put("input", new JSONArray().put(new JSONObject()
@@ -516,17 +523,39 @@ public class GeminiVoice {
         }
     }
 
+    /** Vary the acting style with Airi's mood tags while keeping the transcript itself clean. */
+    private static String styleForText(String text) {
+        String lower = text == null ? "" : text.toLowerCase(java.util.Locale.ROOT);
+        String style = STYLE;
+        if (lower.contains("[excited]") || lower.contains("[surprised]")) {
+            style += " For this line, sound extra bright and excited, with lively upward inflection and a quick, delighted reaction.";
+        } else if (lower.contains("[shy]") || lower.contains("[embarrassed]")) {
+            style += " For this line, sound bashful and sweet, slightly softer and hesitant, with a small upward lilt.";
+        } else if (lower.contains("[angry]") || lower.contains("[determined]")) {
+            style += " For this line, sound spirited and emphatic, with animated energy but no shouting.";
+        } else if (lower.contains("[sleepy]")) {
+            style += " For this line, sound gentle, drowsy, and softly expressive.";
+        } else if (lower.contains("[sad]") || lower.contains("[confused]")) {
+            style += " For this line, sound concerned and sincere, with a softer, questioning lilt.";
+        } else if (lower.contains("[playful]") || lower.contains("[happy]")) {
+            style += " For this line, sound warmly playful and cheerful, with a light, bouncy cadence.";
+        }
+        return style;
+    }
+
     private static String prepareTranscript(String text) {
         if (text == null) {
             return "";
         }
-        // Convert the app's optional stage cues to Gemini 3.8's inline vocal tags.
+        // Convert Airi's optional stage cues to supported inline vocal tags.
         String prepared = text
                 .replaceAll("(?i)\\[whispers\\]", "<whispers>")
                 .replaceAll("(?i)\\[laughs?\\]", "<laugh>")
                 .replaceAll("(?i)\\[sighs?\\]", "<sigh>")
-                .replaceAll("(?i)\\[(excited|curious)\\]", "")
+                .replaceAll("(?i)\\[gasps?\\]", "<gasp>")
+                .replaceAll("(?i)\\[(excited|curious|happy|playful|shy|embarrassed|angry|determined|sleepy|sad|confused|surprised|neutral|thinking)\\]", "")
                 .replaceAll("\\[[^\\]]*\\]", "")
+                .replaceAll("\\s+", " ")
                 .trim();
         return prepared.isEmpty() ? text.trim() : prepared;
     }
