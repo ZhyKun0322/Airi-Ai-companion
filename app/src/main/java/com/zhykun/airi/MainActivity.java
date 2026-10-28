@@ -13,8 +13,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
-import android.speech.tts.TextToSpeech;
-import android.speech.tts.UtteranceProgressListener;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -23,7 +21,6 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.SeekBar;
 import android.widget.TextView;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -144,9 +141,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private TextToSpeech tts;
     private GeminiVoice cloudVoice;
-    private boolean ttsReady = false;
     private SharedPreferences prefs;
     private View root;
     private ImageView imgScene;
@@ -204,7 +199,6 @@ public class MainActivity extends AppCompatActivity {
         applyScene(prefs.getInt("scene", 0));
         imgAiri.setImageResource(NEUTRAL);
         setupAnimations();
-        setupVoice();
         cloudVoice = new GeminiVoice();
 
         // listeners
@@ -303,37 +297,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- voice ----------
 
-    private void setupVoice() {
-        tts = new TextToSpeech(this, status -> {
-            if (status == TextToSpeech.SUCCESS) {
-                tts.setLanguage(Locale.US);
-                applyVoiceSettings();
-                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                    @Override
-                    public void onStart(String id) {
-                        runOnUiThread(() -> startTalking());
-                    }
-
-                    @Override
-                    public void onDone(String id) {
-                        runOnUiThread(() -> stopTalking());
-                    }
-
-                    @Override
-                    public void onError(String id) {
-                        runOnUiThread(() -> stopTalking());
-                    }
-                });
-                ttsReady = true;
-            }
-        });
-    }
-
-    private void applyVoiceSettings() {
-        tts.setPitch(prefs.getFloat("pitch", 1.3f));
-        tts.setSpeechRate(prefs.getFloat("rate", 1.0f));
-    }
-
     private void say(String line, int face, boolean voice) {
         say(line, line, face, voice);
     }
@@ -342,19 +305,21 @@ public class MainActivity extends AppCompatActivity {
         if (liveOn) {
             voice = false; // the live voice is the only one speaking
         }
-        txtBubble.setText(shown);
         imgAiri.removeCallbacks(resetFace);
         cloudVoice.stop();
         stopTalking();
         String key = prefs.getString("api_key", "");
-        if (voice && !key.isEmpty() && prefs.getBoolean("cloud_voice", true)) {
+        if (voice && !key.isEmpty()) {
+            // the words appear at the same moment her voice starts, so they never run ahead of it
             talkFace = face;
+            txtBubble.setText("...");
             cloudVoice.speak(key,
                     prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
                     prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
-                    spoken, 3000, new GeminiVoice.Callback() {
+                    spoken, new GeminiVoice.Callback() {
                         @Override
                         public void onStart() {
+                            txtBubble.setText(shown);
                             startTalking();
                         }
 
@@ -365,22 +330,14 @@ public class MainActivity extends AppCompatActivity {
 
                         @Override
                         public void onError() {
-                            speakLocal(shown, face);
+                            // voice unavailable: show the words instead
+                            txtBubble.setText(shown);
+                            imgAiri.setImageResource(face);
+                            imgAiri.postDelayed(resetFace, 2500);
                         }
                     });
-        } else if (voice) {
-            speakLocal(shown, face);
         } else {
-            imgAiri.setImageResource(face);
-            imgAiri.postDelayed(resetFace, 2500);
-        }
-    }
-
-    private void speakLocal(String line, int face) {
-        if (ttsReady) {
-            talkFace = face;
-            tts.speak(line, TextToSpeech.QUEUE_FLUSH, null, "airi_line");
-        } else {
+            txtBubble.setText(shown);
             imgAiri.setImageResource(face);
             imgAiri.postDelayed(resetFace, 2500);
         }
@@ -654,9 +611,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         cloudVoice.stop();
-        if (tts != null) {
-            tts.stop();
-        }
         stopTalking();
         waiting = false;
         liveOn = true;
@@ -841,15 +795,6 @@ public class MainActivity extends AppCompatActivity {
         return label;
     }
 
-    private SeekBar settingsBar(float value) {
-        SeekBar bar = new SeekBar(this);
-        bar.setMax(150);
-        bar.setProgress((int) ((value - 0.5f) * 100));
-        bar.setProgressTintList(ColorStateList.valueOf(0xFF26D9F2));
-        bar.setThumbTintList(ColorStateList.valueOf(0xFF26D9F2));
-        return bar;
-    }
-
     private void showSettingsDialog() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -895,10 +840,6 @@ public class MainActivity extends AppCompatActivity {
         modelInput.setPadding(dp(14), 0, dp(14), 0);
         modelInput.setMaxLines(1);
 
-        // pitch and speed
-        SeekBar pitchBar = settingsBar(prefs.getFloat("pitch", 1.3f));
-        SeekBar rateBar = settingsBar(prefs.getFloat("rate", 1.0f));
-
         box.addView(settingsLabel("What should Airi call you?"));
         box.addView(nameInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
@@ -909,10 +850,6 @@ public class MainActivity extends AppCompatActivity {
         box.addView(settingsLabel("AI model (change only if chat stops working)"));
         box.addView(modelInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
-        box.addView(settingsLabel("Voice pitch"));
-        box.addView(pitchBar);
-        box.addView(settingsLabel("Speaking speed"));
-        box.addView(rateBar);
         TextView voiceBtn = new TextView(this);
         voiceBtn.setText("Voice: " + prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE) + "  (tap to change)");
         voiceBtn.setTextColor(0xFF26D9F2);
@@ -928,20 +865,6 @@ public class MainActivity extends AppCompatActivity {
             });
         });
         box.addView(voiceBtn);
-
-        TextView modeBtn = new TextView(this);
-        modeBtn.setTextColor(0xFF26D9F2);
-        modeBtn.setTextSize(16);
-        modeBtn.setPadding(0, dp(12), 0, dp(12));
-        modeBtn.setText(prefs.getBoolean("cloud_voice", true)
-                ? "Natural voice: ON  (tap to switch)" : "Natural voice: OFF, fast phone voice  (tap to switch)");
-        modeBtn.setOnClickListener(v -> {
-            boolean on = !prefs.getBoolean("cloud_voice", true);
-            prefs.edit().putBoolean("cloud_voice", on).apply();
-            modeBtn.setText(on ? "Natural voice: ON  (tap to switch)"
-                    : "Natural voice: OFF, fast phone voice  (tap to switch)");
-        });
-        box.addView(modeBtn);
 
         // live voice chat
         EditText liveModelInput = new EditText(this);
@@ -976,8 +899,6 @@ public class MainActivity extends AppCompatActivity {
             String mdl = modelInput.getText().toString().trim();
             SharedPreferences.Editor editor = prefs.edit();
             editor.putString("name", n.isEmpty() ? "friend" : n);
-            editor.putFloat("pitch", 0.5f + pitchBar.getProgress() / 100f);
-            editor.putFloat("rate", 0.5f + rateBar.getProgress() / 100f);
             if (!k.isEmpty()) {
                 editor.putString("api_key", k);
             }
@@ -993,9 +914,6 @@ public class MainActivity extends AppCompatActivity {
                 editor.putString("live_model", liveMdl);
             }
             editor.apply();
-            if (ttsReady) {
-                applyVoiceSettings();
-            }
             say("Okay, " + userName() + "! Settings saved.", HAPPY, true);
         }).show();
     }
@@ -1016,10 +934,6 @@ public class MainActivity extends AppCompatActivity {
         }
         network.shutdownNow();
         cloudVoice.stop();
-        if (tts != null) {
-            tts.stop();
-            tts.shutdown();
-        }
         super.onDestroy();
     }
 }
