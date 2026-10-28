@@ -111,6 +111,15 @@
             android:textColorHint="#8899AA" />
 
         <Button
+            android:id="@+id/btnTalk"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#FF8FB1"
+            android:text="Talk"
+            android:textColor="#0B1424" />
+
+        <Button
             android:id="@+id/btnSend"
             android:layout_width="wrap_content"
             android:layout_height="48dp"

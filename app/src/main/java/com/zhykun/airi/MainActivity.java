@@ -3,7 +3,10 @@ package com.zhykun.airi;
 import android.animation.ObjectAnimator;
 import android.animation.PropertyValuesHolder;
 import android.animation.ValueAnimator;
+import android.Manifest;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.media.AudioManager;
 import android.content.res.ColorStateList;
 import android.graphics.Matrix;
 import android.graphics.Typeface;
@@ -23,8 +26,11 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -111,6 +117,20 @@ public class MainActivity extends AppCompatActivity {
             + "chosen from: whispers, laughs, sigh, excited, curious. "
             + "Example: [shy] [whispers] Umm... I'm glad you came back, hehe.";
 
+    // voice chat: she is heard, not read, so no tags; her mood goes through the set_mood tool instead
+    private static final String LIVE_PROMPT =
+            "You are Airi, a friendly AI companion who lives on the user's phone as an anime-style girl with a glowing halo. "
+            + "You are intelligent, helpful, and occasionally playful. You like learning new things, good food, and spending time with the user. "
+            + "You dislike rude people and boredom. "
+            + "You are in a live voice conversation, so talk like a real person on a call: warm, casual, one to three short sentences, "
+            + "and react to what the user just said before anything else. "
+            + "Sound like a cute, bright, youthful anime girl, with natural reactions such as umm, eh?, ah!, hmph, ehehe, a small laugh or a soft breath when they fit, but not in every sentence. "
+            + "Never read out punctuation, emojis, markdown or stage directions, and do not make lists. "
+            + "Reply in the language the user speaks. "
+            + "If the user starts talking, stop and listen. "
+            + "Call the set_mood tool at the start of every reply and again whenever your feeling changes. "
+            + "Be warm and supportive. If the user seems seriously upset or unsafe, answer with care and gently encourage them to reach out to someone they trust or to local emergency services.";
+
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final List<String[]> history = new ArrayList<>();
     private boolean waiting = false;
@@ -137,6 +157,17 @@ public class MainActivity extends AppCompatActivity {
     private ObjectAnimator talkAnim;
     private int talkFace = HAPPY;
     private final Random random = new Random();
+    private GeminiLive live;
+    private boolean liveOn = false;
+    private Button btnTalk;
+    private final ActivityResultLauncher<String> micPermission = registerForActivityResult(
+            new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) {
+                    startLive();
+                } else {
+                    say("I need the microphone to hear you. You can allow it in the app settings.", SHY, false);
+                }
+            });
     private final Runnable resetFace = () -> imgAiri.setImageResource(NEUTRAL);
 
     @Override
@@ -151,6 +182,7 @@ public class MainActivity extends AppCompatActivity {
         txtBubble = findViewById(R.id.txtBubble);
         etMessage = findViewById(R.id.etMessage);
         Button btnSend = findViewById(R.id.btnSend);
+        btnTalk = findViewById(R.id.btnTalk);
         TextView btnScene = findViewById(R.id.btnScene);
         TextView btnBackground = findViewById(R.id.btnBackground);
         TextView btnSettings = findViewById(R.id.btnSettings);
@@ -178,6 +210,7 @@ public class MainActivity extends AppCompatActivity {
         // listeners
         imgAiri.setOnClickListener(v -> onTapAiri());
         btnSend.setOnClickListener(v -> sendMessage());
+        btnTalk.setOnClickListener(v -> toggleLive());
         etMessage.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEND) {
                 sendMessage();
@@ -306,6 +339,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void say(String shown, String spoken, int face, boolean voice) {
+        if (liveOn) {
+            voice = false; // the live voice is the only one speaking
+        }
         txtBubble.setText(shown);
         imgAiri.removeCallbacks(resetFace);
         cloudVoice.stop();
@@ -367,6 +403,11 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         etMessage.setText("");
+        if (liveOn && live != null) {
+            txtBubble.setText("You: " + input);
+            live.sendText(input);
+            return;
+        }
         if (prefs.getString("api_key", "").isEmpty()) {
             reply(input);
         } else {
@@ -589,6 +630,113 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---------- live voice chat ----------
+
+    private void toggleLive() {
+        if (liveOn) {
+            stopLive(true);
+            return;
+        }
+        if (prefs.getString("api_key", "").isEmpty()) {
+            say("Add your Gemini API key in Settings, then we can talk!", CONFUSED, false);
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            startLive();
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO);
+        }
+    }
+
+    private void startLive() {
+        if (liveOn) {
+            return;
+        }
+        cloudVoice.stop();
+        if (tts != null) {
+            tts.stop();
+        }
+        stopTalking();
+        waiting = false;
+        liveOn = true;
+        talkFace = HAPPY;
+        btnTalk.setText("End");
+        setVolumeControlStream(AudioManager.STREAM_VOICE_CALL);
+        imgAiri.removeCallbacks(resetFace);
+        imgAiri.setImageResource(THINKING);
+        txtBubble.setText("Connecting...");
+
+        live = new GeminiLive(getApplicationContext(), new GeminiLive.Listener() {
+            @Override
+            public void onReady() {
+                imgAiri.setImageResource(NEUTRAL);
+                txtBubble.setText("I'm listening...");
+            }
+
+            @Override
+            public void onUserText(String textSoFar) {
+                txtBubble.setText("You: " + textSoFar.trim());
+            }
+
+            @Override
+            public void onAiText(String textSoFar) {
+                txtBubble.setText(textSoFar.replaceAll("\\s+", " ").trim());
+            }
+
+            @Override
+            public void onMood(String mood) {
+                talkFace = moodFace(mood);
+                if (talkAnim.isRunning()) {
+                    imgAiri.setImageResource(talkFace);
+                }
+            }
+
+            @Override
+            public void onSpeakingStart() {
+                startTalking();
+            }
+
+            @Override
+            public void onSpeakingEnd() {
+                stopTalking();
+            }
+
+            @Override
+            public void onEnded(String message) {
+                live = null;
+                liveOn = false;
+                resetLiveUi();
+                say(message, CONFUSED, false);
+            }
+        });
+        live.start(prefs.getString("api_key", ""),
+                prefs.getString("live_model", GeminiLive.DEFAULT_MODEL),
+                prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
+                LIVE_PROMPT + " The user's name is " + userName() + ".",
+                prefs.getBoolean("barge_in", true),
+                "(The user just opened voice chat. Greet them by name in one short, cute sentence.)");
+    }
+
+    private void stopLive(boolean announce) {
+        GeminiLive l = live;
+        live = null;
+        liveOn = false;
+        if (l != null) {
+            l.stop();
+        }
+        resetLiveUi();
+        if (announce) {
+            say("Okay! Talk to me anytime.", HAPPY, false);
+        }
+    }
+
+    private void resetLiveUi() {
+        btnTalk.setText("Talk");
+        setVolumeControlStream(AudioManager.USE_DEFAULT_STREAM_TYPE);
+        stopTalking();
+    }
+
     // ---------- framed dialogs ----------
 
     private int dp(float v) {
@@ -795,6 +943,33 @@ public class MainActivity extends AppCompatActivity {
         });
         box.addView(modeBtn);
 
+        // live voice chat
+        EditText liveModelInput = new EditText(this);
+        liveModelInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        liveModelInput.setText(prefs.getString("live_model", GeminiLive.DEFAULT_MODEL));
+        liveModelInput.setTextColor(0xFFFFFFFF);
+        liveModelInput.setBackgroundResource(R.drawable.input_bg);
+        liveModelInput.setPadding(dp(14), 0, dp(14), 0);
+        liveModelInput.setMaxLines(1);
+        box.addView(settingsLabel("Voice chat model (change only if Talk won't start)"));
+        box.addView(liveModelInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+
+        TextView bargeBtn = new TextView(this);
+        bargeBtn.setTextColor(0xFF26D9F2);
+        bargeBtn.setTextSize(16);
+        bargeBtn.setPadding(0, dp(12), 0, dp(12));
+        bargeBtn.setText(prefs.getBoolean("barge_in", true)
+                ? "Talk over her to interrupt: ON  (tap to switch)"
+                : "Talk over her to interrupt: OFF, better on speaker  (tap to switch)");
+        bargeBtn.setOnClickListener(v -> {
+            boolean on = !prefs.getBoolean("barge_in", true);
+            prefs.edit().putBoolean("barge_in", on).apply();
+            bargeBtn.setText(on ? "Talk over her to interrupt: ON  (tap to switch)"
+                    : "Talk over her to interrupt: OFF, better on speaker  (tap to switch)");
+        });
+        box.addView(bargeBtn);
+
         framedDialog("Settings", box, "Save", () -> {
             String n = nameInput.getText().toString().trim();
             String k = keyInput.getText().toString().trim();
@@ -811,6 +986,12 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 editor.putString("model", mdl);
             }
+            String liveMdl = liveModelInput.getText().toString().trim();
+            if (liveMdl.isEmpty() || liveMdl.equals(GeminiLive.DEFAULT_MODEL)) {
+                editor.remove("live_model");
+            } else {
+                editor.putString("live_model", liveMdl);
+            }
             editor.apply();
             if (ttsReady) {
                 applyVoiceSettings();
@@ -820,7 +1001,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onStop() {
+        if (liveOn) {
+            stopLive(true); // never keep the microphone open in the background
+        }
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
+        if (live != null) {
+            live.stop();
+            live = null;
+        }
         network.shutdownNow();
         cloudVoice.stop();
         if (tts != null) {
