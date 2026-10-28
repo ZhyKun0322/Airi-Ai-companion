@@ -334,13 +334,16 @@ public class MainActivity extends AppCompatActivity {
 
                         @Override
                         public void onError() {
-                            // Voice failure must not hide the text response.
+                            onError("Request failed without an error detail. Check Logcat for AiriGeminiVoice.");
+                        }
+
+                        @Override
+                        public void onError(String reason) {
+                            // Voice failure must not hide the text response; show a specific diagnosis.
                             txtBubble.setText(shown);
                             imgAiri.setImageResource(face);
                             imgAiri.postDelayed(resetFace, 2500);
-                            Toast.makeText(MainActivity.this,
-                                    "Gemini voice unavailable. Check internet, API access, and quota.",
-                                    Toast.LENGTH_LONG).show();
+                            Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
                         }
                     });
         } else {
@@ -478,16 +481,19 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onError() {
+                onError("Request failed without an error detail. Check Logcat for AiriGeminiVoice.");
+            }
+
+            @Override
+            public void onError(String reason) {
                 if (token != replyToken) {
                     return;
                 }
-                // Voice failure must not hide the text response.
+                // Voice failure must not hide the text response; show a specific diagnosis.
                 txtBubble.setText(shown.isEmpty() ? "..." : shown);
                 imgAiri.setImageResource(face);
                 imgAiri.postDelayed(resetFace, 2500);
-                Toast.makeText(MainActivity.this,
-                        "Gemini voice unavailable. Check internet, API access, and quota.",
-                        Toast.LENGTH_LONG).show();
+                Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
             }
         };
 

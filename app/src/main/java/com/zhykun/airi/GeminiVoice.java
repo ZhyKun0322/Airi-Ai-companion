@@ -20,6 +20,11 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.UnknownHostException;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+import java.net.NoRouteToHostException;
+import javax.net.ssl.SSLException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -43,6 +48,11 @@ public class GeminiVoice {
 
         /** no audio could be played at all */
         void onError();
+
+        /** Optional diagnostic detail; older callback implementations remain compatible. */
+        default void onError(String reason) {
+            onError();
+        }
     }
 
     // Current Gemini TTS model; fall back to the faster/lower-cost model on API failure.
@@ -192,11 +202,13 @@ public class GeminiVoice {
                             sink[0] = null;
                             partialLineWasWritten = false;
                         }
-                        if (partialLineWasWritten || model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
+                        if (partialLineWasWritten || model.equals(FALLBACK_MODEL)
+                                || !isCurrent(id) || !shouldTryFallback(first)) {
                             throw first;
                         }
+                        Log.w(TAG, "Primary TTS model unavailable; trying fallback: " + safeMessage(first));
                         stream(key, FALLBACK_MODEL, voice, line, id, sink, started, cb);
-                        // Keep using the working fallback for the rest of this reply.
+                        // Keep using the fallback for the rest of this reply.
                         model = FALLBACK_MODEL;
                     }
                     if (sink[0] != null) {
@@ -216,6 +228,7 @@ public class GeminiVoice {
             }
         } catch (Exception e) {
             Log.w(TAG, "Gemini speech request failed: " + safeMessage(e));
+            final String friendly = friendlyError(e);
             if (isCurrent(id)) {
                 synchronized (this) {
                     if (id == generation) {
@@ -230,7 +243,7 @@ public class GeminiVoice {
                     if (wasStarted) {
                         cb.onDone();
                     } else {
-                        cb.onError();
+                        cb.onError(friendly);
                     }
                 });
             }
@@ -516,6 +529,90 @@ public class GeminiVoice {
                 .replaceAll("\\[[^\\]]*\\]", "")
                 .trim();
         return prepared.isEmpty() ? text.trim() : prepared;
+    }
+
+    /** Retry another model only for an unavailable model, never for quota/auth/network errors. */
+    private static boolean shouldTryFallback(Exception e) {
+        String m = safeMessage(e).toLowerCase(java.util.Locale.ROOT);
+        return m.contains("http 404") || m.contains("model_not_found")
+                || m.contains("model not found") || m.contains("unknown model");
+    }
+
+    /** Turn transport/API errors into actionable messages without ever showing the API key. */
+    private static String friendlyError(Exception e) {
+        String m = safeMessage(e);
+        String lower = m.toLowerCase(java.util.Locale.ROOT);
+        int status = httpStatus(m);
+        String detail = apiDetail(m);
+        String extra = detail.isEmpty() ? "" : " Details: " + detail;
+
+        if (e instanceof UnknownHostException || lower.contains("unknownhostexception")
+                || lower.contains("unable to resolve host") || lower.contains("no address associated")) {
+            return "Can't reach Gemini. Check Wi-Fi/mobile data, then try again.";
+        }
+        if (e instanceof SocketTimeoutException || lower.contains("timed out")
+                || lower.contains("sockettimeoutexception")) {
+            return "Gemini voice timed out. Check your connection and retry.";
+        }
+        if (e instanceof ConnectException || e instanceof NoRouteToHostException
+                || e instanceof SSLException || lower.contains("failed to connect")) {
+            return "Couldn't connect securely to Gemini. Check your internet connection and retry.";
+        }
+
+        switch (status) {
+            case 400:
+                return "Gemini rejected the voice request (HTTP 400). Check the TTS model/request settings." + extra;
+            case 401:
+                return "Gemini rejected the API key (HTTP 401). Re-enter a valid key from Google AI Studio." + extra;
+            case 402:
+                return "Gemini requires billing or available prepaid credit (HTTP 402). Check Google AI Studio billing." + extra;
+            case 403:
+                return "Gemini denied API/model access (HTTP 403). Check key restrictions, project eligibility, and billing in Google AI Studio." + extra;
+            case 404:
+                return "Gemini could not find the TTS model/endpoint (HTTP 404). Check model access or update the app." + extra;
+            case 429:
+                return "Gemini rate limit or quota reached (HTTP 429). Wait for the limit to reset, then retry." + extra;
+            case 500:
+            case 502:
+            case 503:
+            case 504:
+                return "Gemini's service is temporarily failing (HTTP " + status + "). Try again later." + extra;
+            default:
+                break;
+        }
+
+        if (lower.contains("audiotrack") || lower.contains("audio closed")
+                || lower.contains("no audio chunks")) {
+            return "Gemini returned no playable audio. Check the selected TTS model and try again." + extra;
+        }
+        if (detail.length() > 0) {
+            return "Gemini voice request failed: " + detail;
+        }
+        return "Gemini voice failed: " + (m.length() > 180 ? m.substring(0, 180) : m);
+    }
+
+    private static int httpStatus(String message) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)HTTP\\s+(\\d{3})").matcher(message == null ? "" : message);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : -1;
+    }
+
+    private static String apiDetail(String message) {
+        if (message == null) return "";
+        int start = message.indexOf("{");
+        if (start < 0) return "";
+        try {
+            JSONObject root = new JSONObject(message.substring(start));
+            JSONObject error = root.optJSONObject("error");
+            if (error == null) return "";
+            String detail = error.optString("message", "").trim();
+            if (detail.isEmpty()) return "";
+            // API errors shouldn't include secrets, but scrub anything that resembles a key.
+            detail = detail.replaceAll("(?i)(key|api_key)\\s*[:=]\\s*[^,\\s]+", "$1=[redacted]");
+            return detail.length() > 180 ? detail.substring(0, 180) : detail;
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private static String readErrorBody(InputStream in) {
