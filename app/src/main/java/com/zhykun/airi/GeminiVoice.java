@@ -66,9 +66,16 @@ public class GeminiVoice {
     private AudioTrack track;
     private Runnable finishTask;
     private int generation = 0;
+    private boolean started = false;
+    private Runnable waitTask;
 
     public synchronized void stop() {
         generation++;
+        started = false;
+        if (waitTask != null) {
+            main.removeCallbacks(waitTask);
+            waitTask = null;
+        }
         if (finishTask != null) {
             main.removeCallbacks(finishTask);
             finishTask = null;
@@ -92,11 +99,23 @@ public class GeminiVoice {
         return id == generation;
     }
 
-    public void speak(String key, String model, String voice, String text, Callback cb) {
+    public void speak(String key, String model, String voice, String text, long maxWaitMs, Callback cb) {
         stop();
         final int id;
         synchronized (this) {
             id = generation;
+            // if the audio is not ready in time, give up so the caller can use the phone voice
+            waitTask = () -> {
+                synchronized (GeminiVoice.this) {
+                    if (id != generation || started) {
+                        return;
+                    }
+                    generation++;
+                    waitTask = null;
+                }
+                cb.onError();
+            };
+            main.postDelayed(waitTask, maxWaitMs);
         }
         worker.execute(() -> {
             try {
@@ -104,7 +123,7 @@ public class GeminiVoice {
                 try {
                     pcm = fetch(key, model, voice, text);
                 } catch (Exception first) {
-                    if (model.equals(FALLBACK_MODEL)) {
+                    if (model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
                         throw first;
                     }
                     pcm = fetch(key, FALLBACK_MODEL, voice, text);
@@ -123,6 +142,11 @@ public class GeminiVoice {
     private synchronized void play(Pcm pcm, int id, Callback cb) {
         if (id != generation || pcm.data.length < 2) {
             return;
+        }
+        started = true;
+        if (waitTask != null) {
+            main.removeCallbacks(waitTask);
+            waitTask = null;
         }
         AudioTrack t = new AudioTrack(
                 new AudioAttributes.Builder()

@@ -108,7 +108,7 @@ public class MainActivity extends AppCompatActivity {
             + "Begin every reply with exactly one mood tag in square brackets, chosen from: "
             + "neutral, happy, playful, thinking, surprised, angry, sleepy, embarrassed, excited, shy, confused, determined. "
             + "After the mood tag you may add one voice cue in square brackets right before the words it applies to, "
-            + "chosen from: whispers, laughs, sigh, excited, curious, short pause. "
+            + "chosen from: whispers, laughs, sigh, excited, curious. "
             + "Example: [shy] [whispers] Umm... I'm glad you came back, hehe.";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -311,12 +311,12 @@ public class MainActivity extends AppCompatActivity {
         cloudVoice.stop();
         stopTalking();
         String key = prefs.getString("api_key", "");
-        if (voice && !key.isEmpty()) {
+        if (voice && !key.isEmpty() && prefs.getBoolean("cloud_voice", true)) {
             talkFace = face;
             cloudVoice.speak(key,
                     prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
                     prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
-                    spoken, new GeminiVoice.Callback() {
+                    spoken, 3000, new GeminiVoice.Callback() {
                         @Override
                         public void onStart() {
                             startTalking();
@@ -780,6 +780,20 @@ public class MainActivity extends AppCompatActivity {
             });
         });
         box.addView(voiceBtn);
+
+        TextView modeBtn = new TextView(this);
+        modeBtn.setTextColor(0xFF26D9F2);
+        modeBtn.setTextSize(16);
+        modeBtn.setPadding(0, dp(12), 0, dp(12));
+        modeBtn.setText(prefs.getBoolean("cloud_voice", true)
+                ? "Natural voice: ON  (tap to switch)" : "Natural voice: OFF, fast phone voice  (tap to switch)");
+        modeBtn.setOnClickListener(v -> {
+            boolean on = !prefs.getBoolean("cloud_voice", true);
+            prefs.edit().putBoolean("cloud_voice", on).apply();
+            modeBtn.setText(on ? "Natural voice: ON  (tap to switch)"
+                    : "Natural voice: OFF, fast phone voice  (tap to switch)");
+        });
+        box.addView(modeBtn);
 
         framedDialog("Settings", box, "Save", () -> {
             String n = nameInput.getText().toString().trim();
