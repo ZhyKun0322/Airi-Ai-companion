@@ -62,8 +62,7 @@
             android:id="@+id/imgScene"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:scaleType="centerCrop"
-            android:src="@drawable/bg_room" />
+            android:scaleType="matrix" />
 
         <ImageView
             android:id="@+id/imgAiri"
@@ -72,7 +71,7 @@
             android:layout_gravity="bottom|center_horizontal"
             android:adjustViewBounds="true"
             android:scaleType="fitCenter"
-            android:src="@drawable/airi_full_neutral" />
+            android:src="@drawable/sprite_neutral" />
     </FrameLayout>
 
     <TextView

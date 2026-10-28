@@ -5,7 +5,9 @@ import android.animation.PropertyValuesHolder;
 import android.animation.ValueAnimator;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
+import android.graphics.Matrix;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
@@ -42,24 +44,24 @@ public class MainActivity extends AppCompatActivity {
             {0xFF05070D, 0xFF101826}
     };
 
-    private static final String[] SCENE_NAMES = {"Room", "Garden", "Lake Garden", "Plain"};
-    private static final int[] SCENE_RES = {
-            R.drawable.bg_room, R.drawable.bg_garden, R.drawable.bg_lake, 0
-    };
+    private static final String[] SCENE_NAMES = {"Room", "Garden", "Plain"};
+    private static final int[] SCENE_RES = {R.drawable.scene_room, R.drawable.scene_garden, 0};
+    // which part of a wide scene to show: 0 = left edge, 1 = right edge
+    private static final float[] SCENE_FOCUS = {0.85f, 0.78f, 0.5f};
 
     // full-body poses
-    private static final int NEUTRAL = R.drawable.airi_full_neutral;
-    private static final int HAPPY = R.drawable.airi_full_happy;
-    private static final int PLAYFUL = R.drawable.airi_full_playful;
-    private static final int THINKING = R.drawable.airi_full_thinking;
-    private static final int SURPRISED = R.drawable.airi_full_surprised;
-    private static final int ANGRY = R.drawable.airi_full_angry;
-    private static final int SLEEPY = R.drawable.airi_full_sleepy;
-    private static final int EMBARRASSED = R.drawable.airi_full_embarrassed;
-    private static final int EXCITED = R.drawable.airi_full_excited;
-    private static final int SHY = R.drawable.airi_full_shy;
-    private static final int CONFUSED = R.drawable.airi_full_confused;
-    private static final int DETERMINED = R.drawable.airi_full_determined;
+    private static final int NEUTRAL = R.drawable.sprite_neutral;
+    private static final int HAPPY = R.drawable.sprite_happy;
+    private static final int PLAYFUL = R.drawable.sprite_playful;
+    private static final int THINKING = R.drawable.sprite_thinking;
+    private static final int SURPRISED = R.drawable.sprite_surprised;
+    private static final int ANGRY = R.drawable.sprite_angry;
+    private static final int SLEEPY = R.drawable.sprite_sleepy;
+    private static final int EMBARRASSED = R.drawable.sprite_embarrassed;
+    private static final int EXCITED = R.drawable.sprite_excited;
+    private static final int SHY = R.drawable.sprite_shy;
+    private static final int CONFUSED = R.drawable.sprite_confused;
+    private static final int DETERMINED = R.drawable.sprite_determined;
 
     private static final String[] TAP_LINES = {
             "Eh? Did you need something?",
@@ -77,6 +79,7 @@ public class MainActivity extends AppCompatActivity {
     private SharedPreferences prefs;
     private View root;
     private ImageView imgScene;
+    private int sceneIndex = 0;
     private ImageView imgAiri;
     private TextView txtBubble;
     private EditText etMessage;
@@ -109,6 +112,9 @@ public class MainActivity extends AppCompatActivity {
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
             return insets;
         });
+
+        // keep the scene framed when the layout changes (keyboard, rotation)
+        imgScene.addOnLayoutChangeListener((v, left, top, right, bottom, oldL, oldT, oldR, oldB) -> fitScene());
 
         // look, animation, voice
         applyBackground(prefs.getInt("bg", 0));
@@ -147,12 +153,32 @@ public class MainActivity extends AppCompatActivity {
         if (index < 0 || index >= SCENE_RES.length) {
             index = 0;
         }
+        sceneIndex = index;
         if (SCENE_RES[index] == 0) {
             imgScene.setVisibility(View.GONE);
         } else {
             imgScene.setVisibility(View.VISIBLE);
             imgScene.setImageResource(SCENE_RES[index]);
+            fitScene();
         }
+    }
+
+    private void fitScene() {
+        Drawable d = imgScene.getDrawable();
+        int vw = imgScene.getWidth();
+        int vh = imgScene.getHeight();
+        if (d == null || vw == 0 || vh == 0) {
+            return;
+        }
+        float iw = d.getIntrinsicWidth();
+        float ih = d.getIntrinsicHeight();
+        float scale = Math.max(vw / iw, vh / ih);
+        float dx = (vw - iw * scale) * SCENE_FOCUS[sceneIndex];
+        float dy = (vh - ih * scale) * 0.5f;
+        Matrix m = new Matrix();
+        m.setScale(scale, scale);
+        m.postTranslate(dx, dy);
+        imgScene.setImageMatrix(m);
     }
 
     private void setupAnimations() {
