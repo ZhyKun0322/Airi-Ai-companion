@@ -122,7 +122,8 @@ public class MainActivity extends AppCompatActivity {
             + "You dislike rude people and boredom. "
             + "You are in a live voice conversation, so talk like a real person on a call: warm, casual, one to three short sentences, "
             + "and react to what the user just said before anything else. "
-            + "Sound like a cute, bright, youthful anime girl, with natural reactions such as umm, eh?, ah!, hmph, ehehe, a small laugh or a soft breath when they fit, but not in every sentence. "
+            + "Use an original Japanese-anime-inspired female character performance: a bright youthful mid-to-high register, melodic pitch changes, expressive emotional turns, playful reactions, and clear natural pronunciation. "
+            + "Use natural reactions such as umm, eh?, ah!, hmph, ehehe, a small laugh or a soft breath when they fit, but not in every sentence. "
             + "Never read out punctuation, emojis, markdown or stage directions, and do not make lists. "
             + "Reply in the language the user speaks. "
             + "If the user starts talking, stop and listen. "
@@ -1072,12 +1073,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        replyToken++; // ignore any queued reply/audio callbacks from the old activity
         if (live != null) {
             live.stop();
             live = null;
         }
         network.shutdownNow();
-        cloudVoice.stop();
+        if (cloudVoice != null) {
+            cloudVoice.close();
+        }
         super.onDestroy();
     }
 }

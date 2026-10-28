@@ -21,19 +21,17 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * Speaks text with the Gemini TTS API, streaming: audio starts playing as soon as the
- * first chunk arrives instead of waiting for the whole clip. All callbacks run on the main thread.
+ * Speaks text with Gemini 3.8 TTS. Text remains independent from voice generation;
+ * each sentence is synthesized off the UI thread and played through AudioTrack.
+ * All callbacks run on the main thread.
  */
 public class GeminiVoice {
 
@@ -47,18 +45,20 @@ public class GeminiVoice {
         void onError();
     }
 
-    // Stable Gemini TTS model; try the faster Flash-Lite model if it fails.
+    // Current Gemini TTS model; fall back to the faster/lower-cost model on API failure.
     public static final String DEFAULT_MODEL = "gemini-3.8-flash-tts";
     private static final String FALLBACK_MODEL = "gemini-3.8-flash-lite-tts";
-    public static final String DEFAULT_VOICE = "Leda";
+    public static final String DEFAULT_VOICE = "Leda"; // Google describes Leda as youthful.
 
     private static final String TAG = "AiriGeminiVoice";
-    private static final String API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
-    // Gemini 3.8 expects delivery instructions in speech_metadata, separate from spoken text.
+    // Gemini 3.8 TTS uses POST /v1beta/interactions, not models:streamGenerateContent.
+    private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
     private static final String STYLE =
-            "Warm, bright, cheerful, naturally expressive conversational delivery; "
-            + "gently playful, with clear pronunciation and lively intonation.";
-    private static final Pattern RATE = Pattern.compile("rate=(\\d+)");
+            "Speak as a bright, youthful female anime character voice actress: a light, "
+            + "slightly high-pitched but natural voice, cute and lively intonation, "
+            + "playful emotional changes, warm friendliness, expressive reactions, and "
+            + "clear articulation. Sound like original anime-style character acting, "
+            + "not a flat assistant or narrator. Keep the delivery natural and understandable.";
     // Keep the startup buffer short to reduce the time before the first audible word.
     private static final double PREBUFFER_SEC = 0.12;
 
@@ -82,6 +82,12 @@ public class GeminiVoice {
     public synchronized void stop() {
         generation++;
         releaseTrack();
+    }
+
+    /** Cancels active synthesis and releases the worker when the activity is destroyed. */
+    public void close() {
+        stop();
+        worker.shutdownNow();
     }
 
     private void releaseTrack() {
@@ -144,7 +150,7 @@ public class GeminiVoice {
         return session;
     }
 
-    /** Move saved preview-model preferences forward automatically. */
+    /** Move old saved preview-model preferences to the supported stable TTS models. */
     private String normalizeModel(String model) {
         if (model == null || model.trim().isEmpty()) {
             return DEFAULT_MODEL;
@@ -190,6 +196,8 @@ public class GeminiVoice {
                             throw first;
                         }
                         stream(key, FALLBACK_MODEL, voice, line, id, sink, started, cb);
+                        // Keep using the working fallback for the rest of this reply.
+                        model = FALLBACK_MODEL;
                     }
                     if (sink[0] != null) {
                         sink[0].ensurePlaying(); // a very short first line still starts now
@@ -216,6 +224,9 @@ public class GeminiVoice {
                 }
                 final boolean wasStarted = started[0];
                 main.post(() -> {
+                    if (!isCurrent(id)) {
+                        return;
+                    }
                     if (wasStarted) {
                         cb.onDone();
                     } else {
@@ -226,69 +237,74 @@ public class GeminiVoice {
         }
     }
 
-    /** Streams audio for one request. Throws if nothing could be played. */
+    /** Streams one spoken line using the Gemini Interactions REST API. */
     private void stream(String key, String model, String voice, String text, int id,
                         Sink[] sinkRef, boolean[] started, Callback cb) throws Exception {
-        if (!model.matches("[A-Za-z0-9._-]+")) {
+        if (model == null || !model.matches("[A-Za-z0-9._-]+")) {
             model = DEFAULT_MODEL;
         }
-        if (!voice.matches("[A-Za-z]+")) {
+        if (voice == null || !voice.matches("[A-Za-z]+")) {
             voice = DEFAULT_VOICE;
         }
-        String cacheKey = model + "|" + voice + "|" + text;
-        Pcm hit;
+
+        final String cacheKey = model + "|" + voice + "|" + text;
+        Pcm cached;
         synchronized (cache) {
-            hit = cache.get(cacheKey);
+            cached = cache.get(cacheKey);
         }
-        if (hit != null) {
+        if (cached != null) {
             if (sinkRef[0] == null) {
-                sinkRef[0] = new Sink(hit.rate, id, started, cb);
+                sinkRef[0] = new Sink(cached.rate, id, started, cb);
             }
-            sinkRef[0].write(hit.data, hit.data.length);
+            sinkRef[0].write(cached.data, cached.data.length);
             return;
         }
 
         String transcript = prepareTranscript(text);
-        JSONObject speechPart = new JSONObject()
+        JSONObject textPart = new JSONObject()
+                .put("type", "text")
                 .put("text", transcript)
-                .put("speech_metadata", new JSONObject().put("style", STYLE));
+                .put("annotations", new JSONArray().put(new JSONObject()
+                        .put("type", "speech_metadata")
+                        .put("style", STYLE)));
         JSONObject body = new JSONObject()
-                .put("contents", new JSONArray().put(new JSONObject()
-                        .put("role", "user")
-                        .put("parts", new JSONArray().put(speechPart))))
-                .put("generationConfig", new JSONObject()
-                        .put("responseModalities", new JSONArray().put("AUDIO"))
-                        // Explicit raw PCM avoids WAV headers in a streaming AudioTrack.
-                        .put("responseFormat", new JSONObject()
-                                .put("audio", new JSONObject()
-                                        .put("mimeType", "AUDIO_L16")
-                                        .put("sampleRate", 24000)))
-                        .put("speechConfig", new JSONObject()
-                                .put("voiceConfig", new JSONObject().put("voice", voice))));
+                .put("model", model)
+                .put("input", new JSONArray().put(new JSONObject()
+                        .put("type", "user_input")
+                        .put("content", new JSONArray().put(textPart))))
+                .put("response_format", new JSONObject()
+                        .put("type", "audio")
+                        .put("mime_type", "audio/l16")
+                        .put("sample_rate", 24000))
+                .put("generation_config", new JSONObject()
+                        .put("speech_config", new JSONArray().put(new JSONObject()
+                                .put("voice", voice))))
+                .put("stream", true);
 
-        HttpURLConnection conn = (HttpURLConnection) new URL(
-                API_BASE + model + ":streamGenerateContent?alt=sse").openConnection();
+        HttpURLConnection conn = (HttpURLConnection) new URL(API_URL).openConnection();
         try {
             conn.setRequestMethod("POST");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(30000);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(60000);
             conn.setDoOutput(true);
             conn.setRequestProperty("x-goog-api-key", key);
-            conn.setRequestProperty("content-type", "application/json");
+            conn.setRequestProperty("content-type", "application/json; charset=utf-8");
+            conn.setRequestProperty("accept", "text/event-stream");
             try (OutputStream out = conn.getOutputStream()) {
                 out.write(body.toString().getBytes(StandardCharsets.UTF_8));
             }
+
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
                 String detail = readErrorBody(conn.getErrorStream());
-                throw new IOException("TTS HTTP " + code
+                throw new IOException("Gemini TTS HTTP " + code
                         + (detail.isEmpty() ? "" : ": " + detail));
             }
 
             ByteArrayOutputStream all = new ByteArrayOutputStream();
             byte spare = 0;
             boolean hasSpare = false;
-            boolean first = true;
+            String streamError = "";
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
@@ -299,67 +315,61 @@ public class GeminiVoice {
                     if (!line.startsWith("data:")) {
                         continue;
                     }
-                    String json = line.substring(5).trim();
-                    if (json.isEmpty()) {
+                    String payload = line.substring(5).trim();
+                    if (payload.isEmpty() || "[DONE]".equals(payload)) {
                         continue;
                     }
-                    JSONArray candidates = new JSONObject(json).optJSONArray("candidates");
-                    if (candidates == null || candidates.length() == 0) {
+
+                    JSONObject event;
+                    try {
+                        event = new JSONObject(payload);
+                    } catch (Exception malformedEvent) {
+                        Log.w(TAG, "Ignoring malformed Gemini TTS stream event");
                         continue;
                     }
-                    JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
-                    JSONArray parts = content == null ? null : content.optJSONArray("parts");
-                    if (parts == null) {
-                        continue;
-                    }
-                    for (int i = 0; i < parts.length(); i++) {
-                        JSONObject inline = parts.getJSONObject(i).optJSONObject("inlineData");
-                        if (inline == null || inline.optString("data").isEmpty()) {
-                            continue;
-                        }
-                        byte[] chunk = Base64.decode(inline.getString("data"), Base64.DEFAULT);
-                        int rate = 24000;
-                        Matcher rm = RATE.matcher(inline.optString("mimeType"));
-                        boolean hasRate = rm.find();
-                        if (hasRate) {
-                            rate = Integer.parseInt(rm.group(1));
-                        }
-                        if (first) {
-                            first = false;
-                            Pcm p = toPcm(chunk); // strips a WAV header if there is one
-                            chunk = p.data;
-                            if (!hasRate) {
-                                rate = p.rate;
-                            }
-                            if (sinkRef[0] == null) {
-                                sinkRef[0] = new Sink(rate, id, started, cb);
-                            }
-                        }
-                        if (hasSpare) { // keep samples 16-bit aligned across chunks
+                    JSONObject delta = event.optJSONObject("delta");
+                    String partType = delta == null
+                            ? event.optString("type", "") : delta.optString("type", "");
+                    String encoded = delta == null
+                            ? event.optString("data", "") : delta.optString("data", "");
+
+                    if (!encoded.isEmpty() && "audio".equals(partType)) {
+                        byte[] chunk = Base64.decode(encoded, Base64.DEFAULT);
+                        if (hasSpare) {
                             byte[] joined = new byte[chunk.length + 1];
                             joined[0] = spare;
                             System.arraycopy(chunk, 0, joined, 1, chunk.length);
                             chunk = joined;
                             hasSpare = false;
                         }
-                        int usable = chunk.length & ~1;
+                        int usable = chunk.length & ~1; // keep complete 16-bit samples
                         if (usable != chunk.length) {
                             spare = chunk[chunk.length - 1];
                             hasSpare = true;
                         }
                         if (usable > 0) {
+                            if (sinkRef[0] == null) {
+                                sinkRef[0] = new Sink(24000, id, started, cb);
+                            }
                             all.write(chunk, 0, usable);
-                            sinkRef[0].write(chunk, usable);
+                            sinkRef[0].write(chunk, usable); // playback begins while later chunks arrive
+                        }
+                    } else {
+                        JSONObject error = event.optJSONObject("error");
+                        if (error != null) {
+                            streamError = error.optString("message", "");
                         }
                     }
                 }
             }
+
             if (all.size() == 0) {
-                throw new IOException("no audio");
+                throw new IOException(streamError.isEmpty()
+                        ? "Gemini TTS stream returned no audio chunks" : "Gemini TTS: " + streamError);
             }
             Pcm done = new Pcm();
             done.data = all.toByteArray();
-            done.rate = sinkRef[0].rate;
+            done.rate = 24000;
             synchronized (cache) {
                 cache.put(cacheKey, done);
             }
@@ -368,7 +378,7 @@ public class GeminiVoice {
         }
     }
 
-    /** Plays PCM chunks through one streaming AudioTrack as they arrive. */
+    /** Plays synthesized PCM through a single AudioTrack and drains it before cleanup. */
     private class Sink {
         final int rate;
         final int id;
@@ -447,34 +457,48 @@ public class GeminiVoice {
 
         void finish() throws InterruptedException {
             if (!playing && frames > 0) {
-                begin(); // short clip that never reached the prebuffer size
+                begin(); // very short clips still need to start playback
             }
             if (!playing) {
                 throw new IllegalStateException("no audio");
             }
-            try {
-                t.stop(); // in stream mode, buffered audio keeps playing out
-            } catch (Exception ignored) {
-                // released by stop()
-            }
-            long deadline = System.currentTimeMillis() + frames * 1000L / rate + 2000;
-            try {
-                while (isCurrent(id) && System.currentTimeMillis() < deadline
-                        && t.getPlaybackHeadPosition() < frames) {
-                    Thread.sleep(30);
+
+            // Drain the queued samples before stopping. Stopping first can truncate audio
+            // and some Android audio implementations reset the playback-head position.
+            long deadline = System.currentTimeMillis() + (frames * 1000L / rate) + 5000L;
+            while (isCurrent(id) && System.currentTimeMillis() < deadline) {
+                long played;
+                try {
+                    played = Integer.toUnsignedLong(t.getPlaybackHeadPosition());
+                } catch (IllegalStateException released) {
+                    break; // a stop/new reply released this track
                 }
-            } catch (IllegalStateException ignored) {
-                // released by stop()
+                if (played >= frames) {
+                    break;
+                }
+                Thread.sleep(20);
             }
+
             boolean current;
             synchronized (GeminiVoice.this) {
                 current = id == generation;
                 if (current) {
+                    try {
+                        if (t.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                            t.stop();
+                        }
+                    } catch (Exception ignored) {
+                        // track was already stopped or released
+                    }
                     releaseTrack();
                 }
             }
             if (current) {
-                main.post(cb::onDone);
+                main.post(() -> {
+                    if (isCurrent(id)) {
+                        cb.onDone();
+                    }
+                });
             }
         }
     }
@@ -522,36 +546,5 @@ public class GeminiVoice {
         return message.length() > 700 ? message.substring(0, 700) : message;
     }
 
-    // raw PCM is used as is, a WAV file is unwrapped (assumes mono 16-bit)
-    private static Pcm toPcm(byte[] b) {
-        Pcm p = new Pcm();
-        p.data = b;
-        boolean riff = b.length > 44 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F';
-        if (!riff) {
-            return p;
-        }
-        int pos = 12;
-        while (pos + 8 <= b.length) {
-            String id = new String(b, pos, 4, StandardCharsets.US_ASCII);
-            int size = le32(b, pos + 4);
-            if (size < 0) {
-                break;
-            }
-            if (id.equals("fmt ") && pos + 16 <= b.length) {
-                p.rate = le32(b, pos + 12);
-            }
-            if (id.equals("data")) {
-                int start = pos + 8;
-                int len = start + size > b.length ? b.length - start : size;
-                p.data = Arrays.copyOfRange(b, start, start + len);
-                break;
-            }
-            pos += 8 + size + (size & 1);
-        }
-        return p;
-    }
 
-    private static int le32(byte[] b, int off) {
-        return (b[off] & 0xFF) | (b[off + 1] & 0xFF) << 8 | (b[off + 2] & 0xFF) << 16 | (b[off + 3] & 0xFF) << 24;
-    }
 }
