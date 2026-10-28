@@ -40,6 +40,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
@@ -80,14 +81,16 @@ public class MainActivity extends AppCompatActivity {
     private static final int DETERMINED = R.drawable.sprite_determined;
 
     private static final String[] TAP_LINES = {
-            "Eh? Did you need something?",
-            "Hehe, that tickles!",
-            "H-hey, don't poke me so suddenly!",
-            "I'm right here with you.",
+            "Eh?! D-did you need something?",
+            "Ehehe, that tickles!",
+            "H-hey! Don't poke me so suddenly!",
+            "Umm... I'm right here with you.",
             "Hmph! Stop poking me!",
-            "Let's do our best today!",
-            "Oh! Is something exciting happening?"
+            "Yosh! Let's do our best today!",
+            "Ah! Is something exciting happening?"
     };
+    private static final String[] VOICE_NAMES = {"Leda", "Zephyr", "Kore", "Aoede", "Callirrhoe",
+            "Autonoe", "Despina", "Laomedeia", "Achernar", "Sulafat", "Vindemiatrix"};
     private static final int[] TAP_FACES = {SURPRISED, PLAYFUL, EMBARRASSED, HAPPY, ANGRY, DETERMINED, EXCITED};
 
     // AI chat
@@ -99,10 +102,14 @@ public class MainActivity extends AppCompatActivity {
             "You are Airi, a friendly AI companion who lives on the user's phone as an anime-style girl with a glowing halo. "
             + "You are intelligent, helpful, and occasionally playful. You like learning new things, good food, and spending time with the user. "
             + "You dislike rude people and boredom. "
-            + "Talk casually and warmly in at most two short sentences. Do not use emojis, markdown, or asterisks, because your words are read aloud. "
+            + "Talk casually and warmly in at most two short sentences, like a real anime girl. "
+            + "Use natural spoken reactions when they fit the mood, such as Umm..., Eh?, Ah!, Hmph!, Ehehe, Hmm, Wha-?, or a stammer like H-hey, but not in every reply. "
+            + "Do not use emojis, markdown, or asterisks. "
             + "Begin every reply with exactly one mood tag in square brackets, chosen from: "
             + "neutral, happy, playful, thinking, surprised, angry, sleepy, embarrassed, excited, shy, confused, determined. "
-            + "Example: [happy] I'm glad you came back!";
+            + "After the mood tag you may add one voice cue in square brackets right before the words it applies to, "
+            + "chosen from: whispers, laughs, sigh, excited, curious, short pause. "
+            + "Example: [shy] [whispers] Umm... I'm glad you came back, hehe.";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final List<String[]> history = new ArrayList<>();
@@ -118,6 +125,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private TextToSpeech tts;
+    private GeminiVoice cloudVoice;
     private boolean ttsReady = false;
     private SharedPreferences prefs;
     private View root;
@@ -165,6 +173,7 @@ public class MainActivity extends AppCompatActivity {
         imgAiri.setImageResource(NEUTRAL);
         setupAnimations();
         setupVoice();
+        cloudVoice = new GeminiVoice();
 
         // listeners
         imgAiri.setOnClickListener(v -> onTapAiri());
@@ -293,9 +302,46 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void say(String line, int face, boolean voice) {
-        txtBubble.setText(line);
+        say(line, line, face, voice);
+    }
+
+    private void say(String shown, String spoken, int face, boolean voice) {
+        txtBubble.setText(shown);
         imgAiri.removeCallbacks(resetFace);
-        if (voice && ttsReady) {
+        cloudVoice.stop();
+        stopTalking();
+        String key = prefs.getString("api_key", "");
+        if (voice && !key.isEmpty()) {
+            talkFace = face;
+            cloudVoice.speak(key,
+                    prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
+                    prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
+                    spoken, new GeminiVoice.Callback() {
+                        @Override
+                        public void onStart() {
+                            startTalking();
+                        }
+
+                        @Override
+                        public void onDone() {
+                            stopTalking();
+                        }
+
+                        @Override
+                        public void onError() {
+                            speakLocal(shown, face);
+                        }
+                    });
+        } else if (voice) {
+            speakLocal(shown, face);
+        } else {
+            imgAiri.setImageResource(face);
+            imgAiri.postDelayed(resetFace, 2500);
+        }
+    }
+
+    private void speakLocal(String line, int face) {
+        if (ttsReady) {
             talkFace = face;
             tts.speak(line, TextToSpeech.QUEUE_FLUSH, null, "airi_line");
         } else {
@@ -506,8 +552,12 @@ public class MainActivity extends AppCompatActivity {
         if (line.isEmpty()) {
             line = "...";
         }
-        history.add(new String[]{"assistant", line});
-        say(line, face, true);
+        String shown = line.replaceAll("\\[[^\\]]*\\]", "").replaceAll("\\s+", " ").trim();
+        if (shown.isEmpty()) {
+            shown = "...";
+        }
+        history.add(new String[]{"assistant", shown});
+        say(shown, line, face, true);
     }
 
     private int moodFace(String mood) {
@@ -715,6 +765,21 @@ public class MainActivity extends AppCompatActivity {
         box.addView(pitchBar);
         box.addView(settingsLabel("Speaking speed"));
         box.addView(rateBar);
+        TextView voiceBtn = new TextView(this);
+        voiceBtn.setText("Voice: " + prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE) + "  (tap to change)");
+        voiceBtn.setTextColor(0xFF26D9F2);
+        voiceBtn.setTextSize(16);
+        voiceBtn.setPadding(0, dp(12), 0, dp(12));
+        voiceBtn.setOnClickListener(v -> {
+            int idx = Arrays.asList(VOICE_NAMES).indexOf(
+                    prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE));
+            showChoiceDialog("Voice", VOICE_NAMES, idx, which -> {
+                prefs.edit().putString("tts_voice", VOICE_NAMES[which]).apply();
+                voiceBtn.setText("Voice: " + VOICE_NAMES[which] + "  (tap to change)");
+                say("Ehehe, how do I sound?", "[excited] Ehehe, how do I sound?", HAPPY, true);
+            });
+        });
+        box.addView(voiceBtn);
 
         framedDialog("Settings", box, "Save", () -> {
             String n = nameInput.getText().toString().trim();
@@ -743,6 +808,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         network.shutdownNow();
+        cloudVoice.stop();
         if (tts != null) {
             tts.stop();
             tts.shutdown();
