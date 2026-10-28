@@ -29,9 +29,25 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -73,6 +89,33 @@ public class MainActivity extends AppCompatActivity {
             "Oh! Is something exciting happening?"
     };
     private static final int[] TAP_FACES = {SURPRISED, PLAYFUL, EMBARRASSED, HAPPY, ANGRY, DETERMINED, EXCITED};
+
+    // AI chat
+    private static final String API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
+    private static final String DEFAULT_MODEL = "gemini-flash-lite-latest";
+    private static final int MAX_HISTORY = 12;
+    private static final Pattern MOOD_TAG = Pattern.compile("^\\s*\\[(\\w+)\\]\\s*(.*)$", Pattern.DOTALL);
+    private static final String SYSTEM_PROMPT =
+            "You are Airi, a friendly AI companion who lives on the user's phone as an anime-style girl with a glowing halo. "
+            + "You are intelligent, helpful, and occasionally playful. You like learning new things, good food, and spending time with the user. "
+            + "You dislike rude people and boredom. "
+            + "Talk casually and warmly in at most two short sentences. Do not use emojis, markdown, or asterisks, because your words are read aloud. "
+            + "Begin every reply with exactly one mood tag in square brackets, chosen from: "
+            + "neutral, happy, playful, thinking, surprised, angry, sleepy, embarrassed, excited, shy, confused, determined. "
+            + "Example: [happy] I'm glad you came back!";
+
+    private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final List<String[]> history = new ArrayList<>();
+    private boolean waiting = false;
+
+    private static class ApiException extends Exception {
+        final int code;
+
+        ApiException(int code, String body) {
+            super(body);
+            this.code = code;
+        }
+    }
 
     private TextToSpeech tts;
     private boolean ttsReady = false;
@@ -274,11 +317,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void sendMessage() {
         String input = etMessage.getText().toString().trim();
-        if (input.isEmpty()) {
+        if (input.isEmpty() || waiting) {
             return;
         }
         etMessage.setText("");
-        reply(input);
+        if (prefs.getString("api_key", "").isEmpty()) {
+            reply(input);
+        } else {
+            askAi(input);
+        }
     }
 
     private void reply(String input) {
@@ -302,6 +349,193 @@ public class MainActivity extends AppCompatActivity {
             say("Good question! I can't answer that yet, but I'm learning.", THINKING, true);
         } else {
             say("I'm still learning how to talk. Soon I'll understand much more!", CONFUSED, true);
+        }
+    }
+
+    // ---------- AI chat ----------
+
+    private void showThinking() {
+        txtBubble.setText("...");
+        imgAiri.removeCallbacks(resetFace);
+        imgAiri.setImageResource(THINKING);
+    }
+
+    private void askAi(String input) {
+        waiting = true;
+        showThinking();
+        history.add(new String[]{"user", input});
+        while (history.size() > MAX_HISTORY) {
+            history.remove(0);
+        }
+        while (!history.isEmpty() && history.get(0)[0].equals("assistant")) {
+            history.remove(0);
+        }
+        final String key = prefs.getString("api_key", "");
+        final String system = SYSTEM_PROMPT + " The user's name is " + userName() + ".";
+        final List<String[]> snapshot = new ArrayList<>(history);
+        network.execute(() -> {
+            String reply = null;
+            String problem = null;
+            try {
+                reply = callApi(key, system, snapshot);
+            } catch (Exception e) {
+                problem = friendlyError(e);
+            }
+            final String finalReply = reply;
+            final String finalProblem = problem;
+            runOnUiThread(() -> onAiResult(finalReply, finalProblem));
+        });
+    }
+
+    private String callApi(String key, String system, List<String[]> messages) throws Exception {
+        String model = prefs.getString("model", DEFAULT_MODEL);
+        if (!model.matches("[A-Za-z0-9._-]+")) {
+            model = DEFAULT_MODEL;
+        }
+        JSONArray contents = new JSONArray();
+        for (String[] m : messages) {
+            JSONObject item = new JSONObject();
+            item.put("role", m[0].equals("assistant") ? "model" : "user");
+            item.put("parts", new JSONArray().put(new JSONObject().put("text", m[1])));
+            contents.put(item);
+        }
+        JSONObject body = new JSONObject();
+        body.put("systemInstruction", new JSONObject()
+                .put("parts", new JSONArray().put(new JSONObject().put("text", system))));
+        body.put("contents", contents);
+        body.put("generationConfig", new JSONObject().put("maxOutputTokens", 1024));
+
+        HttpURLConnection conn =
+                (HttpURLConnection) new URL(API_BASE + model + ":generateContent").openConnection();
+        try {
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("x-goog-api-key", key);
+            conn.setRequestProperty("content-type", "application/json");
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int code = conn.getResponseCode();
+            boolean ok = code >= 200 && code < 300;
+            String text = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
+            if (!ok) {
+                throw new ApiException(code, text);
+            }
+            JSONArray candidates = new JSONObject(text).optJSONArray("candidates");
+            StringBuilder sb = new StringBuilder();
+            if (candidates != null && candidates.length() > 0) {
+                JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
+                JSONArray parts = content == null ? null : content.optJSONArray("parts");
+                if (parts != null) {
+                    for (int i = 0; i < parts.length(); i++) {
+                        sb.append(parts.getJSONObject(i).optString("text"));
+                    }
+                }
+            }
+            String reply = sb.toString().trim();
+            if (reply.isEmpty()) {
+                return "[confused] Hmm, I couldn't think of a reply. Could you say that another way?";
+            }
+            return reply;
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private String readAll(InputStream in) throws Exception {
+        if (in == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private String friendlyError(Exception e) {
+        if (!(e instanceof ApiException)) {
+            return "I can't reach the internet right now.";
+        }
+        int code = ((ApiException) e).code;
+        if (code == 401) {
+            return "My key was rejected. Please check the API key in Settings.";
+        }
+        if (code == 404) {
+            return "That AI model isn't available. Try another model name in Settings.";
+        }
+        if (code == 429) {
+            return "I've used up my free chats for now. Try again in a minute.";
+        }
+        if (code >= 500) {
+            return "The AI service is busy right now. Try again soon.";
+        }
+        String detail = "";
+        try {
+            detail = new JSONObject(e.getMessage()).getJSONObject("error").optString("message");
+        } catch (Exception ignored) {
+            // no readable detail
+        }
+        if (detail.length() > 140) {
+            detail = detail.substring(0, 140);
+        }
+        return detail.isEmpty() ? "Something went wrong (error " + code + ")." : detail;
+    }
+
+    private void onAiResult(String text, String problem) {
+        waiting = false;
+        if (problem != null) {
+            if (!history.isEmpty() && history.get(history.size() - 1)[0].equals("user")) {
+                history.remove(history.size() - 1);
+            }
+            say(problem, CONFUSED, false);
+            return;
+        }
+        int face = HAPPY;
+        String line = text.replace("*", "").trim();
+        Matcher m = MOOD_TAG.matcher(line);
+        if (m.matches()) {
+            face = moodFace(m.group(1));
+            line = m.group(2).trim();
+        }
+        if (line.isEmpty()) {
+            line = "...";
+        }
+        history.add(new String[]{"assistant", line});
+        say(line, face, true);
+    }
+
+    private int moodFace(String mood) {
+        switch (mood.toLowerCase(Locale.ROOT)) {
+            case "neutral":
+                return NEUTRAL;
+            case "playful":
+                return PLAYFUL;
+            case "thinking":
+                return THINKING;
+            case "surprised":
+                return SURPRISED;
+            case "angry":
+                return ANGRY;
+            case "sleepy":
+                return SLEEPY;
+            case "embarrassed":
+                return EMBARRASSED;
+            case "excited":
+                return EXCITED;
+            case "shy":
+                return SHY;
+            case "confused":
+                return CONFUSED;
+            case "determined":
+                return DETERMINED;
+            default:
+                return HAPPY;
         }
     }
 
@@ -431,12 +665,51 @@ public class MainActivity extends AppCompatActivity {
         nameInput.setPadding(dp(14), 0, dp(14), 0);
         nameInput.setMaxLines(1);
 
+        // api key (kept only on this phone)
+        boolean hasKey = !prefs.getString("api_key", "").isEmpty();
+        EditText keyInput = new EditText(this);
+        keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        keyInput.setHint(hasKey ? "Saved (type to replace)" : "Paste your Gemini API key");
+        keyInput.setHintTextColor(0xFF8899AA);
+        keyInput.setTextColor(0xFFFFFFFF);
+        keyInput.setBackgroundResource(R.drawable.input_bg);
+        keyInput.setPadding(dp(14), 0, dp(14), 0);
+        keyInput.setMaxLines(1);
+        TextView removeKey = new TextView(this);
+        removeKey.setText("Remove saved key");
+        removeKey.setTextColor(0xFF9FDBFF);
+        removeKey.setTextSize(13);
+        removeKey.setPadding(0, dp(8), 0, 0);
+        removeKey.setVisibility(hasKey ? View.VISIBLE : View.GONE);
+        removeKey.setOnClickListener(v -> {
+            prefs.edit().remove("api_key").apply();
+            history.clear();
+            keyInput.setHint("Paste your Gemini API key");
+            v.setVisibility(View.GONE);
+        });
+
+        // model name
+        EditText modelInput = new EditText(this);
+        modelInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        modelInput.setText(prefs.getString("model", DEFAULT_MODEL));
+        modelInput.setTextColor(0xFFFFFFFF);
+        modelInput.setBackgroundResource(R.drawable.input_bg);
+        modelInput.setPadding(dp(14), 0, dp(14), 0);
+        modelInput.setMaxLines(1);
+
         // pitch and speed
         SeekBar pitchBar = settingsBar(prefs.getFloat("pitch", 1.3f));
         SeekBar rateBar = settingsBar(prefs.getFloat("rate", 1.0f));
 
         box.addView(settingsLabel("What should Airi call you?"));
         box.addView(nameInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+        box.addView(settingsLabel("AI key (stored only on this phone)"));
+        box.addView(keyInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+        box.addView(removeKey);
+        box.addView(settingsLabel("AI model (change only if chat stops working)"));
+        box.addView(modelInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
         box.addView(settingsLabel("Voice pitch"));
         box.addView(pitchBar);
@@ -445,11 +718,21 @@ public class MainActivity extends AppCompatActivity {
 
         framedDialog("Settings", box, "Save", () -> {
             String n = nameInput.getText().toString().trim();
-            prefs.edit()
-                    .putString("name", n.isEmpty() ? "friend" : n)
-                    .putFloat("pitch", 0.5f + pitchBar.getProgress() / 100f)
-                    .putFloat("rate", 0.5f + rateBar.getProgress() / 100f)
-                    .apply();
+            String k = keyInput.getText().toString().trim();
+            String mdl = modelInput.getText().toString().trim();
+            SharedPreferences.Editor editor = prefs.edit();
+            editor.putString("name", n.isEmpty() ? "friend" : n);
+            editor.putFloat("pitch", 0.5f + pitchBar.getProgress() / 100f);
+            editor.putFloat("rate", 0.5f + rateBar.getProgress() / 100f);
+            if (!k.isEmpty()) {
+                editor.putString("api_key", k);
+            }
+            if (mdl.isEmpty() || mdl.equals(DEFAULT_MODEL)) {
+                editor.remove("model");
+            } else {
+                editor.putString("model", mdl);
+            }
+            editor.apply();
             if (ttsReady) {
                 applyVoiceSettings();
             }
@@ -459,6 +742,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        network.shutdownNow();
         if (tts != null) {
             tts.stop();
             tts.shutdown();
