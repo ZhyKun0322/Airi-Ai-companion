@@ -7,6 +7,7 @@ import android.media.AudioTrack;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -46,18 +47,20 @@ public class GeminiVoice {
         void onError();
     }
 
-    public static final String DEFAULT_MODEL = "gemini-3.1-flash-tts-preview";
-    private static final String FALLBACK_MODEL = "gemini-2.5-flash-preview-tts";
+    // Stable Gemini TTS model; try the faster Flash-Lite model if it fails.
+    public static final String DEFAULT_MODEL = "gemini-3.8-flash-tts";
+    private static final String FALLBACK_MODEL = "gemini-3.8-flash-lite-tts";
     public static final String DEFAULT_VOICE = "Leda";
 
+    private static final String TAG = "AiriGeminiVoice";
     private static final String API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
+    // Gemini 3.8 expects delivery instructions in speech_metadata, separate from spoken text.
     private static final String STYLE =
-            "Say the following in the voice of a cute, bright, youthful anime girl. "
-            + "Act out sounds like umm, hmph, eh, ehehe, ah and stammering with real breath and emotion, "
-            + "never read them flatly: ";
+            "Warm, bright, cheerful, naturally expressive conversational delivery; "
+            + "gently playful, with clear pronunciation and lively intonation.";
     private static final Pattern RATE = Pattern.compile("rate=(\\d+)");
-    // start playing once this much audio is buffered (seconds) to avoid stutter
-    private static final double PREBUFFER_SEC = 0.25;
+    // Keep the startup buffer short to reduce the time before the first audible word.
+    private static final double PREBUFFER_SEC = 0.12;
 
     private static class Pcm {
         byte[] data;
@@ -133,9 +136,26 @@ public class GeminiVoice {
             releaseTrack();
             id = generation;
         }
+        final String selectedModel = normalizeModel(model);
+        final String selectedVoice = (voice == null || !voice.matches("[A-Za-z]+"))
+                ? DEFAULT_VOICE : voice;
         final Session session = new Session();
-        worker.execute(() -> run(session, key, model, voice, id, cb));
+        worker.execute(() -> run(session, key, selectedModel, selectedVoice, id, cb));
         return session;
+    }
+
+    /** Move saved preview-model preferences forward automatically. */
+    private String normalizeModel(String model) {
+        if (model == null || model.trim().isEmpty()) {
+            return DEFAULT_MODEL;
+        }
+        String candidate = model.trim();
+        if (candidate.equals("gemini-3.1-flash-tts-preview")
+                || candidate.equals("gemini-2.5-flash-preview-tts")
+                || candidate.equals("gemini-2.5-pro-preview-tts")) {
+            return DEFAULT_MODEL;
+        }
+        return candidate.matches("[A-Za-z0-9._-]+") ? candidate : DEFAULT_MODEL;
     }
 
     private void run(Session session, String key, String model, String voice, int id, Callback cb) {
@@ -151,10 +171,22 @@ public class GeminiVoice {
                     break;
                 }
                 try {
+                    long framesBeforeLine = sink[0] == null ? 0 : sink[0].frames;
                     try {
                         stream(key, model, voice, line, id, sink, started, cb);
                     } catch (Exception first) {
-                        if (started[0] || model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
+                        long framesAfterFailure = sink[0] == null ? 0 : sink[0].frames;
+                        boolean partialLineWasWritten = framesAfterFailure > framesBeforeLine;
+                        if (partialLineWasWritten && !started[0] && framesBeforeLine == 0) {
+                            synchronized (GeminiVoice.this) {
+                                if (id == generation) {
+                                    releaseTrack();
+                                }
+                            }
+                            sink[0] = null;
+                            partialLineWasWritten = false;
+                        }
+                        if (partialLineWasWritten || model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
                             throw first;
                         }
                         stream(key, FALLBACK_MODEL, voice, line, id, sink, started, cb);
@@ -175,7 +207,13 @@ public class GeminiVoice {
                 throw new IOException("no audio");
             }
         } catch (Exception e) {
+            Log.w(TAG, "Gemini speech request failed: " + safeMessage(e));
             if (isCurrent(id)) {
+                synchronized (this) {
+                    if (id == generation) {
+                        releaseTrack();
+                    }
+                }
                 final boolean wasStarted = started[0];
                 main.post(() -> {
                     if (wasStarted) {
@@ -210,15 +248,23 @@ public class GeminiVoice {
             return;
         }
 
+        String transcript = prepareTranscript(text);
+        JSONObject speechPart = new JSONObject()
+                .put("text", transcript)
+                .put("speech_metadata", new JSONObject().put("style", STYLE));
         JSONObject body = new JSONObject()
                 .put("contents", new JSONArray().put(new JSONObject()
-                        .put("parts", new JSONArray().put(new JSONObject().put("text", STYLE + text)))))
+                        .put("role", "user")
+                        .put("parts", new JSONArray().put(speechPart))))
                 .put("generationConfig", new JSONObject()
                         .put("responseModalities", new JSONArray().put("AUDIO"))
+                        // Explicit raw PCM avoids WAV headers in a streaming AudioTrack.
+                        .put("responseFormat", new JSONObject()
+                                .put("audio", new JSONObject()
+                                        .put("mimeType", "AUDIO_L16")
+                                        .put("sampleRate", 24000)))
                         .put("speechConfig", new JSONObject()
-                                .put("voiceConfig", new JSONObject()
-                                        .put("prebuiltVoiceConfig", new JSONObject()
-                                                .put("voiceName", voice)))));
+                                .put("voiceConfig", new JSONObject().put("voice", voice))));
 
         HttpURLConnection conn = (HttpURLConnection) new URL(
                 API_BASE + model + ":streamGenerateContent?alt=sse").openConnection();
@@ -234,7 +280,9 @@ public class GeminiVoice {
             }
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
-                throw new IOException("TTS error " + code);
+                String detail = readErrorBody(conn.getErrorStream());
+                throw new IOException("TTS HTTP " + code
+                        + (detail.isEmpty() ? "" : ": " + detail));
             }
 
             ByteArrayOutputStream all = new ByteArrayOutputStream();
@@ -337,7 +385,8 @@ public class GeminiVoice {
             this.cb = cb;
             int min = AudioTrack.getMinBufferSize(rate,
                     AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            int buf = Math.max(min, rate * 2 * 20); // 20 s of audio, so the next line can be fetched while this one plays
+            // A small streaming buffer reduces latency and avoids very large AudioTrack allocations.
+            int buf = Math.max(min, rate * 2);
             t = new AudioTrack(
                     new AudioAttributes.Builder()
                             .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -351,6 +400,10 @@ public class GeminiVoice {
                     buf,
                     AudioTrack.MODE_STREAM,
                     AudioManager.AUDIO_SESSION_ID_GENERATE);
+            if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+                t.release();
+                throw new IllegalStateException("AudioTrack could not initialize");
+            }
             synchronized (GeminiVoice.this) {
                 if (id != generation) {
                     t.release();
@@ -424,6 +477,49 @@ public class GeminiVoice {
                 main.post(cb::onDone);
             }
         }
+    }
+
+    private static String prepareTranscript(String text) {
+        if (text == null) {
+            return "";
+        }
+        // Convert the app's optional stage cues to Gemini 3.8's inline vocal tags.
+        String prepared = text
+                .replaceAll("(?i)\\[whispers\\]", "<whispers>")
+                .replaceAll("(?i)\\[laughs?\\]", "<laugh>")
+                .replaceAll("(?i)\\[sighs?\\]", "<sigh>")
+                .replaceAll("(?i)\\[(excited|curious)\\]", "")
+                .replaceAll("\\[[^\\]]*\\]", "")
+                .trim();
+        return prepared.isEmpty() ? text.trim() : prepared;
+    }
+
+    private static String readErrorBody(InputStream in) {
+        if (in == null) {
+            return "";
+        }
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            StringBuilder result = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (result.length() > 600) {
+                    break;
+                }
+                result.append(line);
+            }
+            return result.length() > 600 ? result.substring(0, 600) : result.toString();
+        } catch (IOException ignored) {
+            return "";
+        }
+    }
+
+    private static String safeMessage(Exception e) {
+        String message = e.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return e.getClass().getSimpleName();
+        }
+        return message.length() > 700 ? message.substring(0, 700) : message;
     }
 
     // raw PCM is used as is, a WAV file is unwrapped (assumes mono 16-bit)

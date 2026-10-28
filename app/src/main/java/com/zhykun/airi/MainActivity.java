@@ -22,6 +22,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -312,9 +313,9 @@ public class MainActivity extends AppCompatActivity {
         stopTalking();
         String key = prefs.getString("api_key", "");
         if (voice && !key.isEmpty()) {
-            // the words appear at the same moment her voice starts, so they never run ahead of it
+            // Show the words immediately; voice synthesis continues independently.
             talkFace = face;
-            txtBubble.setText("...");
+            txtBubble.setText(shown);
             cloudVoice.speak(key,
                     prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
                     prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
@@ -332,16 +333,24 @@ public class MainActivity extends AppCompatActivity {
 
                         @Override
                         public void onError() {
-                            // voice unavailable: show the words instead
+                            // Voice failure must not hide the text response.
                             txtBubble.setText(shown);
                             imgAiri.setImageResource(face);
                             imgAiri.postDelayed(resetFace, 2500);
+                            Toast.makeText(MainActivity.this,
+                                    "Gemini voice unavailable. Check internet, API access, and quota.",
+                                    Toast.LENGTH_LONG).show();
                         }
                     });
         } else {
             txtBubble.setText(shown);
             imgAiri.setImageResource(face);
             imgAiri.postDelayed(resetFace, 2500);
+            if (voice && key.isEmpty()) {
+                Toast.makeText(this,
+                        "Add a Gemini API key in Settings to enable voice.",
+                        Toast.LENGTH_LONG).show();
+            }
         }
     }
 
@@ -447,7 +456,6 @@ public class MainActivity extends AppCompatActivity {
         // below: only touched on the UI thread
         private String shown = "";
         private int face = HAPPY;
-        private boolean textLive = false;
 
         final GeminiVoice.Callback callback = new GeminiVoice.Callback() {
             @Override
@@ -455,7 +463,6 @@ public class MainActivity extends AppCompatActivity {
                 if (token != replyToken) {
                     return;
                 }
-                textLive = true;
                 talkFace = face;
                 txtBubble.setText(shown.isEmpty() ? "..." : shown);
                 startTalking();
@@ -473,11 +480,13 @@ public class MainActivity extends AppCompatActivity {
                 if (token != replyToken) {
                     return;
                 }
-                // voice unavailable: show the words instead
-                textLive = true;
+                // Voice failure must not hide the text response.
                 txtBubble.setText(shown.isEmpty() ? "..." : shown);
                 imgAiri.setImageResource(face);
                 imgAiri.postDelayed(resetFace, 2500);
+                Toast.makeText(MainActivity.this,
+                        "Gemini voice unavailable. Check internet, API access, and quota.",
+                        Toast.LENGTH_LONG).show();
             }
         };
 
@@ -547,9 +556,8 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
                 shown = shown.isEmpty() ? visible : shown + " " + visible;
-                if (textLive) {
-                    txtBubble.setText(shown);
-                }
+                // Never leave the user staring at "..." while the voice API is working.
+                txtBubble.setText(shown);
             });
         }
 
