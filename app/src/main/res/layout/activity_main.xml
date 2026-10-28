@@ -13,13 +13,24 @@
         android:padding="8dp">
 
         <TextView
+            android:id="@+id/btnScene"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="12dp"
+            android:text="Scene"
+            android:textColor="#9FDBFF"
+            android:textSize="15sp" />
+
+        <TextView
             android:id="@+id/btnBackground"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:clickable="true"
             android:focusable="true"
             android:padding="12dp"
-            android:text="Background"
+            android:text="Theme"
             android:textColor="#9FDBFF"
             android:textSize="15sp" />
 
@@ -36,21 +47,32 @@
     </LinearLayout>
 
     <FrameLayout
+        android:id="@+id/sceneCard"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
+        android:layout_weight="1"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="12dp"
+        android:background="@drawable/card_bg"
+        android:clipToOutline="true"
+        android:foreground="@drawable/card_stroke">
+
+        <ImageView
+            android:id="@+id/imgScene"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop"
+            android:src="@drawable/bg_room" />
 
         <ImageView
             android:id="@+id/imgAiri"
-            android:layout_width="300dp"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_gravity="bottom|center_horizontal"
             android:adjustViewBounds="true"
-            android:background="@drawable/card_bg"
-            android:clipToOutline="true"
-            android:foreground="@drawable/card_stroke"
             android:scaleType="fitCenter"
-            android:src="@drawable/airi_neutral" />
+            android:src="@drawable/airi_full_neutral" />
     </FrameLayout>
 
     <TextView
@@ -62,7 +84,7 @@
         android:background="@drawable/bubble_bg"
         android:gravity="center"
         android:minLines="2"
-        android:padding="16dp"
+        android:padding="14dp"
         android:text="..."
         android:textColor="#FFFFFF"
         android:textSize="16sp" />

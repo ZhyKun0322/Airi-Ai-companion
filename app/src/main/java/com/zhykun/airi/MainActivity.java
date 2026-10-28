@@ -4,11 +4,14 @@ import android.animation.ObjectAnimator;
 import android.animation.PropertyValuesHolder;
 import android.animation.ValueAnimator;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
@@ -26,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat;
 
 import java.util.Locale;
 import java.util.Random;
+import java.util.function.IntConsumer;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -38,32 +42,48 @@ public class MainActivity extends AppCompatActivity {
             {0xFF05070D, 0xFF101826}
     };
 
+    private static final String[] SCENE_NAMES = {"Room", "Garden", "Lake Garden", "Plain"};
+    private static final int[] SCENE_RES = {
+            R.drawable.bg_room, R.drawable.bg_garden, R.drawable.bg_lake, 0
+    };
+
+    // full-body poses
+    private static final int NEUTRAL = R.drawable.airi_full_neutral;
+    private static final int HAPPY = R.drawable.airi_full_happy;
+    private static final int PLAYFUL = R.drawable.airi_full_playful;
+    private static final int THINKING = R.drawable.airi_full_thinking;
+    private static final int SURPRISED = R.drawable.airi_full_surprised;
+    private static final int ANGRY = R.drawable.airi_full_angry;
+    private static final int SLEEPY = R.drawable.airi_full_sleepy;
+    private static final int EMBARRASSED = R.drawable.airi_full_embarrassed;
+    private static final int EXCITED = R.drawable.airi_full_excited;
+    private static final int SHY = R.drawable.airi_full_shy;
+    private static final int CONFUSED = R.drawable.airi_full_confused;
+    private static final int DETERMINED = R.drawable.airi_full_determined;
+
     private static final String[] TAP_LINES = {
             "Eh? Did you need something?",
             "Hehe, that tickles!",
             "H-hey, don't poke me so suddenly!",
             "I'm right here with you.",
-            "Hmm? Want to chat?"
+            "Hmph! Stop poking me!",
+            "Let's do our best today!",
+            "Oh! Is something exciting happening?"
     };
-    private static final int[] TAP_FACES = {
-            R.drawable.airi_surprised,
-            R.drawable.airi_playful,
-            R.drawable.airi_embarrassed,
-            R.drawable.airi_happy,
-            R.drawable.airi_determined
-    };
+    private static final int[] TAP_FACES = {SURPRISED, PLAYFUL, EMBARRASSED, HAPPY, ANGRY, DETERMINED, EXCITED};
 
     private TextToSpeech tts;
     private boolean ttsReady = false;
     private SharedPreferences prefs;
     private View root;
+    private ImageView imgScene;
     private ImageView imgAiri;
     private TextView txtBubble;
     private EditText etMessage;
     private ObjectAnimator talkAnim;
-    private int talkFace = R.drawable.airi_happy;
+    private int talkFace = HAPPY;
     private final Random random = new Random();
-    private final Runnable resetFace = () -> imgAiri.setImageResource(R.drawable.airi_neutral);
+    private final Runnable resetFace = () -> imgAiri.setImageResource(NEUTRAL);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,10 +92,12 @@ public class MainActivity extends AppCompatActivity {
 
         // get views
         root = findViewById(R.id.main);
+        imgScene = findViewById(R.id.imgScene);
         imgAiri = findViewById(R.id.imgAiri);
         txtBubble = findViewById(R.id.txtBubble);
         etMessage = findViewById(R.id.etMessage);
         Button btnSend = findViewById(R.id.btnSend);
+        TextView btnScene = findViewById(R.id.btnScene);
         TextView btnBackground = findViewById(R.id.btnBackground);
         TextView btnSettings = findViewById(R.id.btnSettings);
         prefs = getSharedPreferences("airi_prefs", MODE_PRIVATE);
@@ -90,7 +112,8 @@ public class MainActivity extends AppCompatActivity {
 
         // look, animation, voice
         applyBackground(prefs.getInt("bg", 0));
-        imgAiri.setImageResource(R.drawable.airi_neutral);
+        applyScene(prefs.getInt("scene", 0));
+        imgAiri.setImageResource(NEUTRAL);
         setupAnimations();
         setupVoice();
 
@@ -104,11 +127,12 @@ public class MainActivity extends AppCompatActivity {
             }
             return false;
         });
-        btnBackground.setOnClickListener(v -> showBackgroundDialog());
+        btnScene.setOnClickListener(v -> showSceneDialog());
+        btnBackground.setOnClickListener(v -> showThemeDialog());
         btnSettings.setOnClickListener(v -> showSettingsDialog());
 
         // greeting
-        say("Welcome back, " + userName() + "!", R.drawable.airi_happy, false);
+        say("Welcome back, " + userName() + "!", HAPPY, false);
     }
 
     // ---------- look and animation ----------
@@ -119,19 +143,35 @@ public class MainActivity extends AppCompatActivity {
         root.setBackground(g);
     }
 
+    private void applyScene(int index) {
+        if (index < 0 || index >= SCENE_RES.length) {
+            index = 0;
+        }
+        if (SCENE_RES[index] == 0) {
+            imgScene.setVisibility(View.GONE);
+        } else {
+            imgScene.setVisibility(View.VISIBLE);
+            imgScene.setImageResource(SCENE_RES[index]);
+        }
+    }
+
     private void setupAnimations() {
-        // idle float
-        float lift = 12 * getResources().getDisplayMetrics().density;
+        // idle float (small, so she looks like a hologram)
+        float lift = 5 * getResources().getDisplayMetrics().density;
         ObjectAnimator floatAnim = ObjectAnimator.ofFloat(imgAiri, "translationY", 0f, -lift);
-        floatAnim.setDuration(2200);
+        floatAnim.setDuration(2400);
         floatAnim.setRepeatCount(ValueAnimator.INFINITE);
         floatAnim.setRepeatMode(ValueAnimator.REVERSE);
         floatAnim.start();
 
-        // talking pulse
+        // talking pulse from her feet
+        imgAiri.post(() -> {
+            imgAiri.setPivotX(imgAiri.getWidth() / 2f);
+            imgAiri.setPivotY(imgAiri.getHeight());
+        });
         talkAnim = ObjectAnimator.ofPropertyValuesHolder(imgAiri,
-                PropertyValuesHolder.ofFloat("scaleX", 1f, 1.03f),
-                PropertyValuesHolder.ofFloat("scaleY", 1f, 1.03f));
+                PropertyValuesHolder.ofFloat("scaleX", 1f, 1.012f),
+                PropertyValuesHolder.ofFloat("scaleY", 1f, 1.012f));
         talkAnim.setDuration(250);
         talkAnim.setRepeatCount(ValueAnimator.INFINITE);
         talkAnim.setRepeatMode(ValueAnimator.REVERSE);
@@ -147,7 +187,7 @@ public class MainActivity extends AppCompatActivity {
         talkAnim.cancel();
         imgAiri.setScaleX(1f);
         imgAiri.setScaleY(1f);
-        imgAiri.setImageResource(R.drawable.airi_neutral);
+        imgAiri.setImageResource(NEUTRAL);
     }
 
     // ---------- voice ----------
@@ -219,89 +259,176 @@ public class MainActivity extends AppCompatActivity {
         String msg = input.toLowerCase(Locale.ROOT);
         String name = userName();
         if (msg.matches(".*\\b(hi|hello|hey)\\b.*")) {
-            say("Hi, " + name + "! I'm glad you're here.", R.drawable.airi_happy, true);
+            say("Hi, " + name + "! I'm glad you're here.", HAPPY, true);
         } else if (msg.contains("how are you")) {
-            say("I'm doing great, thanks for asking! How about you?", R.drawable.airi_happy, true);
+            say("I'm doing great, thanks for asking! How about you?", HAPPY, true);
         } else if (msg.contains("your name") || msg.contains("who are you")) {
-            say("I'm Airi, your AI companion!", R.drawable.airi_excited, true);
+            say("I'm Airi, your AI companion!", EXCITED, true);
         } else if (msg.contains("thank")) {
-            say("It's nothing! I'm just happy to help.", R.drawable.airi_shy, true);
+            say("It's nothing! I'm just happy to help.", SHY, true);
         } else if (msg.contains("tired") || msg.contains("sleepy")) {
-            say("You sound tired. Maybe take a short break?", R.drawable.airi_sleepy, true);
+            say("You sound tired. Maybe take a short break?", SLEEPY, true);
         } else if (msg.contains("love") || msg.contains("cute")) {
-            say("Wh-what? Stop it, you're making me blush!", R.drawable.airi_embarrassed, true);
+            say("Wh-what? Stop it, you're making me blush!", SHY, true);
         } else if (msg.matches(".*\\b(bye|goodnight)\\b.*") || msg.contains("good night")) {
-            say("Good night, " + name + ". Sleep well!", R.drawable.airi_sleepy, true);
+            say("Good night, " + name + ". Sleep well!", SLEEPY, true);
         } else if (msg.contains("?")) {
-            say("Good question! I can't answer that yet, but I'm learning.", R.drawable.airi_thinking, true);
+            say("Good question! I can't answer that yet, but I'm learning.", THINKING, true);
         } else {
-            say("I'm still learning how to talk. Soon I'll understand much more!", R.drawable.airi_confused, true);
+            say("I'm still learning how to talk. Soon I'll understand much more!", CONFUSED, true);
         }
     }
 
-    // ---------- customization ----------
+    // ---------- framed dialogs ----------
 
-    private void showBackgroundDialog() {
-        new AlertDialog.Builder(this)
-                .setTitle("Background")
-                .setItems(BG_NAMES, (d, which) -> {
-                    prefs.edit().putInt("bg", which).apply();
-                    applyBackground(which);
-                })
-                .show();
+    private int dp(float v) {
+        return (int) (v * getResources().getDisplayMetrics().density);
+    }
+
+    private TextView dialogButton(String text, int color) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setTextColor(color);
+        b.setTextSize(16);
+        b.setTypeface(null, Typeface.BOLD);
+        b.setPadding(dp(16), dp(10), dp(16), dp(10));
+        b.setClickable(true);
+        b.setFocusable(true);
+        return b;
+    }
+
+    private AlertDialog framedDialog(String title, View content, String okText, Runnable onOk) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackgroundResource(R.drawable.dialog_bg);
+        box.setPadding(dp(22), dp(20), dp(22), dp(14));
+
+        // title
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(0xFF9FDBFF);
+        t.setTextSize(20);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setPadding(0, 0, 0, dp(12));
+        box.addView(t);
+        box.addView(content);
+
+        // buttons
+        AlertDialog dialog = new AlertDialog.Builder(this).create();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.END);
+        row.setPadding(0, dp(12), 0, 0);
+        TextView cancel = dialogButton(okText == null ? "Close" : "Cancel", 0xFF9FDBFF);
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        row.addView(cancel);
+        if (okText != null) {
+            TextView ok = dialogButton(okText, 0xFF26D9F2);
+            ok.setOnClickListener(v -> {
+                onOk.run();
+                dialog.dismiss();
+            });
+            row.addView(ok);
+        }
+        box.addView(row);
+
+        dialog.setView(box);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+        }
+        return dialog;
+    }
+
+    private void showChoiceDialog(String title, String[] names, int current, IntConsumer onPick) {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        AlertDialog dialog = framedDialog(title, list, null, null);
+        for (int i = 0; i < names.length; i++) {
+            final int index = i;
+            TextView item = new TextView(this);
+            item.setText((i == current ? "\u25CF  " : "\u25CB  ") + names[i]);
+            item.setTextColor(i == current ? 0xFF26D9F2 : 0xFFFFFFFF);
+            item.setTextSize(17);
+            item.setPadding(0, dp(12), 0, dp(12));
+            item.setClickable(true);
+            item.setOnClickListener(v -> {
+                onPick.accept(index);
+                dialog.dismiss();
+            });
+            list.addView(item);
+        }
+        dialog.show();
+    }
+
+    private void showSceneDialog() {
+        showChoiceDialog("Scene", SCENE_NAMES, prefs.getInt("scene", 0), which -> {
+            prefs.edit().putInt("scene", which).apply();
+            applyScene(which);
+        });
+    }
+
+    private void showThemeDialog() {
+        showChoiceDialog("Theme", BG_NAMES, prefs.getInt("bg", 0), which -> {
+            prefs.edit().putInt("bg", which).apply();
+            applyBackground(which);
+        });
+    }
+
+    private TextView settingsLabel(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(0xFFCFE9FF);
+        label.setTextSize(14);
+        label.setPadding(0, dp(10), 0, dp(4));
+        return label;
+    }
+
+    private SeekBar settingsBar(float value) {
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(150);
+        bar.setProgress((int) ((value - 0.5f) * 100));
+        bar.setProgressTintList(ColorStateList.valueOf(0xFF26D9F2));
+        bar.setThumbTintList(ColorStateList.valueOf(0xFF26D9F2));
+        return bar;
     }
 
     private void showSettingsDialog() {
-        int pad = (int) (20 * getResources().getDisplayMetrics().density);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(pad, pad, pad, 0);
 
         // name
-        TextView nameLabel = new TextView(this);
-        nameLabel.setText("What should Airi call you?");
         EditText nameInput = new EditText(this);
         nameInput.setInputType(InputType.TYPE_CLASS_TEXT);
         nameInput.setText(userName());
+        nameInput.setTextColor(0xFFFFFFFF);
+        nameInput.setBackgroundResource(R.drawable.input_bg);
+        nameInput.setPadding(dp(14), 0, dp(14), 0);
+        nameInput.setMaxLines(1);
 
-        // pitch
-        TextView pitchLabel = new TextView(this);
-        pitchLabel.setText("Voice pitch");
-        SeekBar pitchBar = new SeekBar(this);
-        pitchBar.setMax(150);
-        pitchBar.setProgress((int) ((prefs.getFloat("pitch", 1.3f) - 0.5f) * 100));
+        // pitch and speed
+        SeekBar pitchBar = settingsBar(prefs.getFloat("pitch", 1.3f));
+        SeekBar rateBar = settingsBar(prefs.getFloat("rate", 1.0f));
 
-        // speed
-        TextView rateLabel = new TextView(this);
-        rateLabel.setText("Speaking speed");
-        SeekBar rateBar = new SeekBar(this);
-        rateBar.setMax(150);
-        rateBar.setProgress((int) ((prefs.getFloat("rate", 1.0f) - 0.5f) * 100));
-
-        box.addView(nameLabel);
-        box.addView(nameInput);
-        box.addView(pitchLabel);
+        box.addView(settingsLabel("What should Airi call you?"));
+        box.addView(nameInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+        box.addView(settingsLabel("Voice pitch"));
         box.addView(pitchBar);
-        box.addView(rateLabel);
+        box.addView(settingsLabel("Speaking speed"));
         box.addView(rateBar);
 
-        new AlertDialog.Builder(this)
-                .setTitle("Settings")
-                .setView(box)
-                .setPositiveButton("Save", (d, w) -> {
-                    String n = nameInput.getText().toString().trim();
-                    prefs.edit()
-                            .putString("name", n.isEmpty() ? "friend" : n)
-                            .putFloat("pitch", 0.5f + pitchBar.getProgress() / 100f)
-                            .putFloat("rate", 0.5f + rateBar.getProgress() / 100f)
-                            .apply();
-                    if (ttsReady) {
-                        applyVoiceSettings();
-                    }
-                    say("Okay, " + userName() + "! Settings saved.", R.drawable.airi_happy, true);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        framedDialog("Settings", box, "Save", () -> {
+            String n = nameInput.getText().toString().trim();
+            prefs.edit()
+                    .putString("name", n.isEmpty() ? "friend" : n)
+                    .putFloat("pitch", 0.5f + pitchBar.getProgress() / 100f)
+                    .putFloat("rate", 0.5f + rateBar.getProgress() / 100f)
+                    .apply();
+            if (ttsReady) {
+                applyVoiceSettings();
+            }
+            say("Okay, " + userName() + "! Settings saved.", HAPPY, true);
+        }).show();
     }
 
     @Override
