@@ -24,6 +24,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -100,42 +102,95 @@ public class GeminiVoice {
         return id == generation;
     }
 
+    /** Lines added to a session are spoken back to back, in one gapless stream of audio. */
+    public static final class Session {
+        private static final String END = "\u0000END";
+        private final LinkedBlockingQueue<String> queue = new LinkedBlockingQueue<>();
+
+        public void add(String line) {
+            if (line != null && !line.trim().isEmpty()) {
+                queue.offer(line);
+            }
+        }
+
+        /** no more lines will come */
+        public void end() {
+            queue.offer(END);
+        }
+    }
+
     public void speak(String key, String model, String voice, String text, Callback cb) {
+        Session s = begin(key, model, voice, cb);
+        s.add(text);
+        s.end();
+    }
+
+    /** Opens a session: the first line added starts the request right away, later lines follow it. */
+    public Session begin(String key, String model, String voice, Callback cb) {
         final int id;
         synchronized (this) {
             generation++;
             releaseTrack();
             id = generation;
         }
-        worker.execute(() -> {
-            boolean[] started = {false};
-            try {
-                try {
-                    stream(key, model, voice, text, id, started, cb);
-                } catch (Exception first) {
-                    if (started[0] || model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
-                        throw first;
-                    }
-                    stream(key, FALLBACK_MODEL, voice, text, id, started, cb);
+        final Session session = new Session();
+        worker.execute(() -> run(session, key, model, voice, id, cb));
+        return session;
+    }
+
+    private void run(Session session, String key, String model, String voice, int id, Callback cb) {
+        Sink[] sink = {null};
+        boolean[] started = {false};
+        try {
+            while (isCurrent(id)) {
+                String line = session.queue.poll(200, TimeUnit.MILLISECONDS);
+                if (line == null) {
+                    continue;
                 }
-            } catch (Exception e) {
-                if (isCurrent(id)) {
-                    final boolean wasStarted = started[0];
-                    main.post(() -> {
-                        if (wasStarted) {
-                            cb.onDone();
-                        } else {
-                            cb.onError();
+                if (Session.END.equals(line)) {
+                    break;
+                }
+                try {
+                    try {
+                        stream(key, model, voice, line, id, sink, started, cb);
+                    } catch (Exception first) {
+                        if (started[0] || model.equals(FALLBACK_MODEL) || !isCurrent(id)) {
+                            throw first;
                         }
-                    });
+                        stream(key, FALLBACK_MODEL, voice, line, id, sink, started, cb);
+                    }
+                    if (sink[0] != null) {
+                        sink[0].ensurePlaying(); // a very short first line still starts now
+                    }
+                } catch (Exception e) {
+                    if (!started[0]) {
+                        throw e; // nothing played at all
+                    }
+                    // otherwise skip this one line and carry on with the next
                 }
             }
-        });
+            if (isCurrent(id) && sink[0] != null) {
+                sink[0].finish();
+            } else if (isCurrent(id)) {
+                throw new IOException("no audio");
+            }
+        } catch (Exception e) {
+            if (isCurrent(id)) {
+                final boolean wasStarted = started[0];
+                main.post(() -> {
+                    if (wasStarted) {
+                        cb.onDone();
+                    } else {
+                        cb.onError();
+                    }
+                });
+            }
+        }
     }
 
     /** Streams audio for one request. Throws if nothing could be played. */
     private void stream(String key, String model, String voice, String text, int id,
-                        boolean[] started, Callback cb) throws Exception {
+                        Sink[] sinkRef, boolean[] started, Callback cb) throws Exception {
         if (!model.matches("[A-Za-z0-9._-]+")) {
             model = DEFAULT_MODEL;
         }
@@ -148,9 +203,10 @@ public class GeminiVoice {
             hit = cache.get(cacheKey);
         }
         if (hit != null) {
-            Sink sink = new Sink(hit.rate, id, started, cb);
-            sink.write(hit.data, hit.data.length);
-            sink.finish();
+            if (sinkRef[0] == null) {
+                sinkRef[0] = new Sink(hit.rate, id, started, cb);
+            }
+            sinkRef[0].write(hit.data, hit.data.length);
             return;
         }
 
@@ -182,7 +238,6 @@ public class GeminiVoice {
             }
 
             ByteArrayOutputStream all = new ByteArrayOutputStream();
-            Sink sink = null;
             byte spare = 0;
             boolean hasSpare = false;
             boolean first = true;
@@ -228,7 +283,9 @@ public class GeminiVoice {
                             if (!hasRate) {
                                 rate = p.rate;
                             }
-                            sink = new Sink(rate, id, started, cb);
+                            if (sinkRef[0] == null) {
+                                sinkRef[0] = new Sink(rate, id, started, cb);
+                            }
                         }
                         if (hasSpare) { // keep samples 16-bit aligned across chunks
                             byte[] joined = new byte[chunk.length + 1];
@@ -244,21 +301,20 @@ public class GeminiVoice {
                         }
                         if (usable > 0) {
                             all.write(chunk, 0, usable);
-                            sink.write(chunk, usable);
+                            sinkRef[0].write(chunk, usable);
                         }
                     }
                 }
             }
-            if (sink == null) {
+            if (all.size() == 0) {
                 throw new IOException("no audio");
             }
             Pcm done = new Pcm();
             done.data = all.toByteArray();
-            done.rate = sink.rate;
+            done.rate = sinkRef[0].rate;
             synchronized (cache) {
                 cache.put(cacheKey, done);
             }
-            sink.finish();
         } finally {
             conn.disconnect();
         }
@@ -281,7 +337,7 @@ public class GeminiVoice {
             this.cb = cb;
             int min = AudioTrack.getMinBufferSize(rate,
                     AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            int buf = Math.max(min, rate); // about half a second
+            int buf = Math.max(min, rate * 2 * 20); // 20 s of audio, so the next line can be fetched while this one plays
             t = new AudioTrack(
                     new AudioAttributes.Builder()
                             .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -316,6 +372,12 @@ public class GeminiVoice {
                 if (!playing && frames >= rate * PREBUFFER_SEC) {
                     begin();
                 }
+            }
+        }
+
+        void ensurePlaying() {
+            if (!playing && frames > 0) {
+                begin();
             }
         }
 

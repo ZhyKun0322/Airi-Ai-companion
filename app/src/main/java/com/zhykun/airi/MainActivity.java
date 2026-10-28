@@ -131,6 +131,7 @@ public class MainActivity extends AppCompatActivity {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final List<String[]> history = new ArrayList<>();
     private boolean waiting = false;
+    private int replyToken = 0;
 
     private static class ApiException extends Exception {
         final int code;
@@ -305,6 +306,7 @@ public class MainActivity extends AppCompatActivity {
         if (liveOn) {
             voice = false; // the live voice is the only one speaking
         }
+        replyToken++; // anything still streaming in from an earlier reply is dropped
         imgAiri.removeCallbacks(resetFace);
         cloudVoice.stop();
         stopTalking();
@@ -417,21 +419,172 @@ public class MainActivity extends AppCompatActivity {
         final String key = prefs.getString("api_key", "");
         final String system = SYSTEM_PROMPT + " The user's name is " + userName() + ".";
         final List<String[]> snapshot = new ArrayList<>(history);
+        final ReplyStream rs = new ReplyStream(++replyToken);
+        // the voice session opens now, and each sentence is handed over the moment it is written
+        rs.session = cloudVoice.begin(key,
+                prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
+                prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
+                rs.callback);
         network.execute(() -> {
-            String reply = null;
             String problem = null;
             try {
-                reply = callApi(key, system, snapshot);
+                streamApi(key, system, snapshot, rs);
             } catch (Exception e) {
                 problem = friendlyError(e);
             }
-            final String finalReply = reply;
-            final String finalProblem = problem;
-            runOnUiThread(() -> onAiResult(finalReply, finalProblem));
+            rs.finish(problem);
         });
     }
 
-    private String callApi(String key, String system, List<String[]> messages) throws Exception {
+    /** Receives the AI reply piece by piece and speaks it sentence by sentence. */
+    private class ReplyStream {
+        final int token;
+        GeminiVoice.Session session;
+        private final StringBuilder raw = new StringBuilder();
+        private int cut = 0;
+        private boolean firstLine = true;
+        private boolean any = false;
+        // below: only touched on the UI thread
+        private String shown = "";
+        private int face = HAPPY;
+        private boolean textLive = false;
+
+        final GeminiVoice.Callback callback = new GeminiVoice.Callback() {
+            @Override
+            public void onStart() {
+                if (token != replyToken) {
+                    return;
+                }
+                textLive = true;
+                talkFace = face;
+                txtBubble.setText(shown.isEmpty() ? "..." : shown);
+                startTalking();
+            }
+
+            @Override
+            public void onDone() {
+                if (token == replyToken) {
+                    stopTalking();
+                }
+            }
+
+            @Override
+            public void onError() {
+                if (token != replyToken) {
+                    return;
+                }
+                // voice unavailable: show the words instead
+                textLive = true;
+                txtBubble.setText(shown.isEmpty() ? "..." : shown);
+                imgAiri.setImageResource(face);
+                imgAiri.postDelayed(resetFace, 2500);
+            }
+        };
+
+        ReplyStream(int token) {
+            this.token = token;
+        }
+
+        // network thread
+        void onDelta(String delta) {
+            raw.append(delta.replace("*", ""));
+            int end;
+            while ((end = sentenceEnd()) > 0) {
+                handle(raw.substring(cut, end));
+                cut = end;
+            }
+        }
+
+        // index just past the next finished sentence (not inside [tags]), or -1
+        private int sentenceEnd() {
+            int depth = 0;
+            int letters = 0;
+            for (int i = cut; i < raw.length(); i++) {
+                char c = raw.charAt(i);
+                if (c == '[') {
+                    depth++;
+                } else if (c == ']') {
+                    depth = Math.max(0, depth - 1);
+                } else if (depth == 0) {
+                    if (!Character.isWhitespace(c) && ".!?\u2026~".indexOf(c) < 0) {
+                        letters++;
+                    }
+                    if (".!?\u2026".indexOf(c) >= 0 && letters >= 8
+                            && i + 1 < raw.length() && Character.isWhitespace(raw.charAt(i + 1))) {
+                        return i + 1;
+                    }
+                }
+            }
+            return -1;
+        }
+
+        private void handle(String piece) {
+            String spoken = piece.trim();
+            if (spoken.isEmpty()) {
+                return;
+            }
+            if (firstLine) {
+                firstLine = false;
+                Matcher m = MOOD_TAG.matcher(spoken);
+                if (m.matches()) {
+                    final int f = moodFace(m.group(1));
+                    spoken = m.group(2).trim();
+                    runOnUiThread(() -> {
+                        if (token == replyToken) {
+                            face = f;
+                        }
+                    });
+                }
+            }
+            String visible = spoken.replaceAll("\\[[^\\]]*\\]", "").replaceAll("\\s+", " ").trim();
+            if (visible.isEmpty()) {
+                return;
+            }
+            any = true;
+            session.add(spoken); // her voice starts on the first sentence
+            runOnUiThread(() -> {
+                if (token != replyToken) {
+                    return;
+                }
+                shown = shown.isEmpty() ? visible : shown + " " + visible;
+                if (textLive) {
+                    txtBubble.setText(shown);
+                }
+            });
+        }
+
+        // network thread, when the stream is over
+        void finish(String problem) {
+            if (cut < raw.length()) {
+                handle(raw.substring(cut)); // the last sentence has no space after it
+                cut = raw.length();
+            }
+            session.end();
+            final boolean empty = !any;
+            final String problemText = problem;
+            runOnUiThread(() -> {
+                waiting = false;
+                if (token != replyToken) {
+                    return; // something else took over while she was thinking
+                }
+                if (empty) {
+                    cloudVoice.stop();
+                    if (!history.isEmpty() && history.get(history.size() - 1)[0].equals("user")) {
+                        history.remove(history.size() - 1);
+                    }
+                    if (problemText != null) {
+                        say(problemText, CONFUSED, false);
+                    } else {
+                        say("Hmm, I couldn't think of a reply. Could you say that another way?", CONFUSED, true);
+                    }
+                    return;
+                }
+                history.add(new String[]{"assistant", shown});
+            });
+        }
+    }
+
+    private void streamApi(String key, String system, List<String[]> messages, ReplyStream out) throws Exception {
         String model = prefs.getString("model", DEFAULT_MODEL);
         if (!model.matches("[A-Za-z0-9._-]+")) {
             model = DEFAULT_MODEL;
@@ -449,8 +602,8 @@ public class MainActivity extends AppCompatActivity {
         body.put("contents", contents);
         body.put("generationConfig", new JSONObject().put("maxOutputTokens", 1024));
 
-        HttpURLConnection conn =
-                (HttpURLConnection) new URL(API_BASE + model + ":generateContent").openConnection();
+        HttpURLConnection conn = (HttpURLConnection) new URL(
+                API_BASE + model + ":streamGenerateContent?alt=sse").openConnection();
         try {
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(15000);
@@ -458,31 +611,41 @@ public class MainActivity extends AppCompatActivity {
             conn.setDoOutput(true);
             conn.setRequestProperty("x-goog-api-key", key);
             conn.setRequestProperty("content-type", "application/json");
-            try (OutputStream out = conn.getOutputStream()) {
-                out.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            try (OutputStream o = conn.getOutputStream()) {
+                o.write(body.toString().getBytes(StandardCharsets.UTF_8));
             }
             int code = conn.getResponseCode();
-            boolean ok = code >= 200 && code < 300;
-            String text = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
-            if (!ok) {
-                throw new ApiException(code, text);
+            if (code < 200 || code >= 300) {
+                throw new ApiException(code, readAll(conn.getErrorStream()));
             }
-            JSONArray candidates = new JSONObject(text).optJSONArray("candidates");
-            StringBuilder sb = new StringBuilder();
-            if (candidates != null && candidates.length() > 0) {
-                JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
-                JSONArray parts = content == null ? null : content.optJSONArray("parts");
-                if (parts != null) {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data:")) {
+                        continue;
+                    }
+                    String json = line.substring(5).trim();
+                    if (json.isEmpty()) {
+                        continue;
+                    }
+                    JSONArray candidates = new JSONObject(json).optJSONArray("candidates");
+                    if (candidates == null || candidates.length() == 0) {
+                        continue;
+                    }
+                    JSONObject content = candidates.getJSONObject(0).optJSONObject("content");
+                    JSONArray parts = content == null ? null : content.optJSONArray("parts");
+                    if (parts == null) {
+                        continue;
+                    }
                     for (int i = 0; i < parts.length(); i++) {
-                        sb.append(parts.getJSONObject(i).optString("text"));
+                        String t = parts.getJSONObject(i).optString("text");
+                        if (!t.isEmpty()) {
+                            out.onDelta(t);
+                        }
                     }
                 }
             }
-            String reply = sb.toString().trim();
-            if (reply.isEmpty()) {
-                return "[confused] Hmm, I couldn't think of a reply. Could you say that another way?";
-            }
-            return reply;
         } finally {
             conn.disconnect();
         }
@@ -529,33 +692,6 @@ public class MainActivity extends AppCompatActivity {
             detail = detail.substring(0, 140);
         }
         return detail.isEmpty() ? "Something went wrong (error " + code + ")." : detail;
-    }
-
-    private void onAiResult(String text, String problem) {
-        waiting = false;
-        if (problem != null) {
-            if (!history.isEmpty() && history.get(history.size() - 1)[0].equals("user")) {
-                history.remove(history.size() - 1);
-            }
-            say(problem, CONFUSED, false);
-            return;
-        }
-        int face = HAPPY;
-        String line = text.replace("*", "").trim();
-        Matcher m = MOOD_TAG.matcher(line);
-        if (m.matches()) {
-            face = moodFace(m.group(1));
-            line = m.group(2).trim();
-        }
-        if (line.isEmpty()) {
-            line = "...";
-        }
-        String shown = line.replaceAll("\\[[^\\]]*\\]", "").replaceAll("\\s+", " ").trim();
-        if (shown.isEmpty()) {
-            shown = "...";
-        }
-        history.add(new String[]{"assistant", shown});
-        say(shown, line, face, true);
     }
 
     private int moodFace(String mood) {
