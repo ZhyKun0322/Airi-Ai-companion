@@ -22,7 +22,6 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -106,7 +105,7 @@ public class MainActivity extends AppCompatActivity {
             "You are Airi, a friendly AI companion who lives on the user's phone as an anime-style girl with a glowing halo. "
             + "You are intelligent, helpful, and occasionally playful. You like learning new things, good food, and spending time with the user. "
             + "You dislike rude people and boredom. "
-            + "Usually reply in one short sentence; use a second short sentence only when needed. Sound like a real anime girl, not an explanatory narrator. "
+            + "Talk casually and warmly in at most two short sentences, like a real anime girl. "
             + "Use natural spoken reactions when they fit the mood, such as Umm..., Eh?, Ah!, Hmph!, Ehehe, Hmm, Wha-?, or a stammer like H-hey, but not in every reply. "
             + "Do not use emojis, markdown, or asterisks. "
             + "Begin every reply with exactly one mood tag in square brackets, chosen from: "
@@ -122,8 +121,7 @@ public class MainActivity extends AppCompatActivity {
             + "You dislike rude people and boredom. "
             + "You are in a live voice conversation, so talk like a real person on a call: warm, casual, one to three short sentences, "
             + "and react to what the user just said before anything else. "
-            + "Use an original Japanese-anime-inspired female character performance: a bright youthful mid-to-high register, melodic pitch changes, expressive emotional turns, playful reactions, and clear natural pronunciation. "
-            + "Use natural reactions such as umm, eh?, ah!, hmph, ehehe, a small laugh or a soft breath when they fit, but not in every sentence. "
+            + "Sound like a cute, bright, youthful anime girl, with natural reactions such as umm, eh?, ah!, hmph, ehehe, a small laugh or a soft breath when they fit, but not in every sentence. "
             + "Never read out punctuation, emojis, markdown or stage directions, and do not make lists. "
             + "Reply in the language the user speaks. "
             + "If the user starts talking, stop and listen. "
@@ -314,9 +312,9 @@ public class MainActivity extends AppCompatActivity {
         stopTalking();
         String key = prefs.getString("api_key", "");
         if (voice && !key.isEmpty()) {
-            // Show the words immediately; voice synthesis continues independently.
+            // the words appear at the same moment her voice starts, so they never run ahead of it
             talkFace = face;
-            txtBubble.setText(shown);
+            txtBubble.setText("...");
             cloudVoice.speak(key,
                     prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL),
                     prefs.getString("tts_voice", GeminiVoice.DEFAULT_VOICE),
@@ -334,32 +332,37 @@ public class MainActivity extends AppCompatActivity {
 
                         @Override
                         public void onError() {
-                            onError("Request failed without an error detail. Check Logcat for AiriGeminiVoice.");
+                            // voice unavailable: show the words instead
+                            txtBubble.setText(shown);
+                            imgAiri.setImageResource(face);
+                            imgAiri.postDelayed(resetFace, 2500);
                         }
 
                         @Override
                         public void onError(String reason) {
-                            // Voice failure must not hide the text response; show a specific diagnosis.
-                            txtBubble.setText(shown);
-                            imgAiri.setImageResource(face);
-                            imgAiri.postDelayed(resetFace, 2500);
-                            Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
+                            voiceProblem(reason);
+                            onError();
                         }
                     });
         } else {
             txtBubble.setText(shown);
             imgAiri.setImageResource(face);
             imgAiri.postDelayed(resetFace, 2500);
-            if (voice && key.isEmpty()) {
-                Toast.makeText(this,
-                        "Add a Gemini API key in Settings to enable voice.",
-                        Toast.LENGTH_LONG).show();
-            }
         }
     }
 
     private String userName() {
         return prefs.getString("name", "friend");
+    }
+
+    /** Tells the user why she is silent, so a broken voice is never a mystery. */
+    private void voiceProblem(String reason) {
+        if (reason == null || reason.isEmpty()) {
+            return;
+        }
+        android.util.Log.w("Airi", "voice problem: " + reason);
+        android.widget.Toast.makeText(this, "Voice unavailable: " + reason,
+                android.widget.Toast.LENGTH_LONG).show();
     }
 
     // ---------- interaction ----------
@@ -457,10 +460,10 @@ public class MainActivity extends AppCompatActivity {
         private int cut = 0;
         private boolean firstLine = true;
         private boolean any = false;
-        private String moodTag = "";
         // below: only touched on the UI thread
         private String shown = "";
         private int face = HAPPY;
+        private boolean textLive = false;
 
         final GeminiVoice.Callback callback = new GeminiVoice.Callback() {
             @Override
@@ -468,6 +471,7 @@ public class MainActivity extends AppCompatActivity {
                 if (token != replyToken) {
                     return;
                 }
+                textLive = true;
                 talkFace = face;
                 txtBubble.setText(shown.isEmpty() ? "..." : shown);
                 startTalking();
@@ -482,19 +486,22 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onError() {
-                onError("Request failed without an error detail. Check Logcat for AiriGeminiVoice.");
+                if (token != replyToken) {
+                    return;
+                }
+                // voice unavailable: show the words instead
+                textLive = true;
+                txtBubble.setText(shown.isEmpty() ? "..." : shown);
+                imgAiri.setImageResource(face);
+                imgAiri.postDelayed(resetFace, 2500);
             }
 
             @Override
             public void onError(String reason) {
-                if (token != replyToken) {
-                    return;
+                if (token == replyToken) {
+                    voiceProblem(reason);
                 }
-                // Voice failure must not hide the text response; show a specific diagnosis.
-                txtBubble.setText(shown.isEmpty() ? "..." : shown);
-                imgAiri.setImageResource(face);
-                imgAiri.postDelayed(resetFace, 2500);
-                Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
+                onError();
             }
         };
 
@@ -527,8 +534,7 @@ public class MainActivity extends AppCompatActivity {
                         letters++;
                     }
                     if (".!?\u2026".indexOf(c) >= 0 && letters >= 8
-                            && (i + 1 == raw.length() || Character.isWhitespace(raw.charAt(i + 1)))) {
-                        // Don't wait for another generated token just to receive trailing whitespace.
+                            && i + 1 < raw.length() && Character.isWhitespace(raw.charAt(i + 1))) {
                         return i + 1;
                     }
                 }
@@ -545,9 +551,7 @@ public class MainActivity extends AppCompatActivity {
                 firstLine = false;
                 Matcher m = MOOD_TAG.matcher(spoken);
                 if (m.matches()) {
-                    String mood = m.group(1).toLowerCase(Locale.ROOT);
-                    moodTag = "[" + mood + "]";
-                    final int f = moodFace(mood);
+                    final int f = moodFace(m.group(1));
                     spoken = m.group(2).trim();
                     runOnUiThread(() -> {
                         if (token == replyToken) {
@@ -561,17 +565,15 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             any = true;
-            // Carry the reply's mood into TTS metadata so her voice acts the emotion,
-            // not just the on-screen sprite.
-            String voiceLine = moodTag.isEmpty() ? spoken : moodTag + " " + spoken;
-            session.add(voiceLine); // synthesize as soon as a speakable phrase is ready
+            session.add(spoken); // her voice starts on the first sentence
             runOnUiThread(() -> {
                 if (token != replyToken) {
                     return;
                 }
                 shown = shown.isEmpty() ? visible : shown + " " + visible;
-                // Never leave the user staring at "..." while the voice API is working.
-                txtBubble.setText(shown);
+                if (textLive) {
+                    txtBubble.setText(shown);
+                }
             });
         }
 
@@ -1024,6 +1026,18 @@ public class MainActivity extends AppCompatActivity {
         });
         box.addView(voiceBtn);
 
+        // voice model (the speech engine)
+        EditText ttsModelInput = new EditText(this);
+        ttsModelInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        ttsModelInput.setText(prefs.getString("tts_model", GeminiVoice.DEFAULT_MODEL));
+        ttsModelInput.setTextColor(0xFFFFFFFF);
+        ttsModelInput.setBackgroundResource(R.drawable.input_bg);
+        ttsModelInput.setPadding(dp(14), 0, dp(14), 0);
+        ttsModelInput.setMaxLines(1);
+        box.addView(settingsLabel("Speech model (change only if she stops talking)"));
+        box.addView(ttsModelInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+
         // live voice chat
         EditText liveModelInput = new EditText(this);
         liveModelInput.setInputType(InputType.TYPE_CLASS_TEXT);
@@ -1065,6 +1079,12 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 editor.putString("model", mdl);
             }
+            String ttsMdl = ttsModelInput.getText().toString().trim();
+            if (ttsMdl.isEmpty() || ttsMdl.equals(GeminiVoice.DEFAULT_MODEL)) {
+                editor.remove("tts_model");
+            } else {
+                editor.putString("tts_model", ttsMdl);
+            }
             String liveMdl = liveModelInput.getText().toString().trim();
             if (liveMdl.isEmpty() || liveMdl.equals(GeminiLive.DEFAULT_MODEL)) {
                 editor.remove("live_model");
@@ -1086,15 +1106,12 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        replyToken++; // ignore any queued reply/audio callbacks from the old activity
         if (live != null) {
             live.stop();
             live = null;
         }
         network.shutdownNow();
-        if (cloudVoice != null) {
-            cloudVoice.close();
-        }
+        cloudVoice.stop();
         super.onDestroy();
     }
 }
